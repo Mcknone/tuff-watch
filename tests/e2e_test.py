@@ -19,8 +19,12 @@ window.maplibregl = (function(){
     removeSource(id){ delete this.s[id]; } addLayer(l,before){ if(this.l[l.id]) throw new Error('dup layer '+l.id); if(before && !this.l[before]) throw new Error('missing before '+before); this.l[l.id]=l; }
     getLayer(id){return this.l[id];} removeLayer(id){ delete this.l[id]; } setLayoutProperty(){}
     setProjection(p){ this.proj=p; } setTerrain(t){ this.terrain=t; } getPitch(){ return 0; } getZoom(){ return 2; }
-    easeTo(){} resize(){} }
-  return { Map, NavigationControl: class{}, ScaleControl: class{} };
+    easeTo(){} resize(){}
+    getCanvasContainer(){ return document.getElementById('map'); } getCanvas(){ return document.getElementById('map'); }
+    unproject(p){ return { lng: 10 + p[0] / 100, lat: -5 - p[1] / 100 }; }
+    get dragRotate(){ return { enable(){} }; } get touchZoomRotate(){ return { enable(){} }; } get touchPitch(){ return { enable(){} }; } }
+  class Marker { constructor(){ window.__markers = (window.__markers || 0) + 1; } setLngLat(){ return this; } addTo(){ return this; } remove(){} }
+  return { Map, Marker, NavigationControl: class{}, ScaleControl: class{} };
 })();"""
 CHART_STUB = """window.Chart = class { constructor(el,cfg){ this.cfg=cfg; window.__chart=this; this.scales={x:{getPixelForValue:()=>0,getValueForPixel:()=>0}}; } update(){} destroy(){} };"""
 
@@ -118,12 +122,39 @@ with sync_playwright() as p:
     page.select_option('#context', 'viirs-tc'); page.wait_for_timeout(100)
     layers_ctx = page.evaluate("Object.keys(window.__map.l)")
     legend = page.inner_text('#legend')
+    # flood output at the last date
+    page.click('.tabs button[data-tab=findings]')
+    flood = page.inner_text('.finding.water'); print('FLOOD:\n', flood[:900])
+    # pre-event baseline comparison on the map
+    page.check('#show-baseline'); page.wait_for_timeout(100)
+    legend_base = page.inner_text('#legend')
+    page.uncheck('#show-baseline')
+    # middle-click on the map adds an AOI point, right-click menu is suppressed
+    rows0 = page.locator('#coord-body tr').count()
+    page.dispatch_event('#map', 'mousedown', {'button': 1, 'clientX': 400, 'clientY': 300})
+    page.dispatch_event('#map', 'mouseup', {'button': 1, 'clientX': 401, 'clientY': 300})
+    page.wait_for_timeout(100)
+    rows1 = page.locator('#coord-body tr').count()
+    ctx_prevented = page.evaluate("(() => { const e = new MouseEvent('contextmenu', {bubbles: true, cancelable: true}); document.getElementById('map').dispatchEvent(e); return e.defaultPrevented; })()")
+    toast = page.inner_text('#toast')
+    # guided tour
+    page.click('#tour-btn')
+    tour_titles = []
+    for k in range(8):
+        tour_titles.append(page.inner_text('#tour-title'))
+        if k < 7: page.click('.tour-next')
+    last_btn = page.inner_text('.tour-next'); progress = page.inner_text('.tour-count')
+    page.click('.tour-prev'); back_title = page.inner_text('#tour-title')
+    page.click('.tour-skip'); tour_closed = page.locator('.tour').count() == 0
+    page.click('#tour-btn'); reopened = page.inner_text('#tour-title'); page.keyboard.press('Escape')
     with page.expect_download() as dl: page.click('#export-csv')
     csv = open(dl.value.path()).read()
     page.screenshot(path='/home/claude/e2e_screenshot.png', full_page=False)
     b.close()
 srv.shutdown()
 
+print('TOUR', tour_titles, last_btn, progress, back_title, tour_closed, reopened)
+print('rows', rows0, rows1, 'ctx prevented', ctx_prevented, 'toast', toast)
 print('first date', first_date, '| layers original', layers_orig, '| classified', layers_cls, '| ctx', layers_ctx)
 print('CSV lines', len(csv.splitlines())); print(csv.splitlines()[0]); print(csv.splitlines()[1])
 print('ERRORS', errors)
@@ -131,10 +162,22 @@ assert not [e for e in errors if 'Failed to load resource' not in e], errors
 assert 'returned real NASA data' in status
 assert 'Vegetation loss' in findings and 'Severe' in findings and 'km²' in findings
 assert 'Detected by 2+ independent sensors' in findings
-assert 'LIVE' in sources and 'No acquisitions' in sources and 'NISAR' in sources
+assert 'Live data' in sources and 'No acquisitions' in sources and 'NISAR' in sources
 assert 'colour map not available' in sources        # chlorophyll colour map 404 fallback
 assert svg_circles >= 10
 assert first_date == '2026-05-01'
 assert any(l.startswith('gibs-') for l in layers_orig) and 'classified' in layers_cls and 'ctx-viirs-tc' in layers_ctx
 assert 'Severe' in legend and len(csv.splitlines()) > 10
+# floods: categorical extent + confidence, never a severity level, never the whole area
+assert 'Newly inundated' in flood and 'Valid coverage' in flood and 'Confidence' in flood and 'Baseline' in flood
+assert 'Severe' not in flood and 'Moderate' not in flood
+assert 'New water detected' in flood or 'No new water detected' in flood or 'Insufficient data' in flood
+assert 'class table' in sources                      # MODIS flood colour map 404 -> not used, not guessed
+assert 'Newly inundated' in legend and 'pre-event baseline' in legend_base
+assert 'new_water_km2' in csv.splitlines()[0]
+# map controls
+assert rows1 == rows0 + 1 and ctx_prevented and 'added' in toast
+# tour
+assert tour_titles[0].startswith('Welcome') and len(set(tour_titles)) == 8
+assert last_btn == 'Start exploring' and progress == 'Step 8 of 8' and tour_closed and reopened.startswith('Welcome')
 print('E2E: all assertions passed')

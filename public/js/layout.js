@@ -27,6 +27,12 @@ export function initLayout(changed) {
   refresh(false);
 }
 
+/** Make sure a panel is visible and expanded (used by the guided tour). */
+export function revealPanel(id) {
+  const p = document.getElementById(id);
+  if (p && p.classList.contains('collapsed')) { setCollapsed(p, false); refresh(); }
+}
+
 // --------------------------------------------------------------- persistence
 function save() {
   const state = { panels: {}, sizes: {} };
