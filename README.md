@@ -7,7 +7,9 @@ satellite data**. Runs on **Cloudflare Workers**, no Google Earth Engine needed.
 ## What it does
 
 1. **Coordinates table** – type latitude/longitude (1 point = circle, 2 = rectangle, 3+ = polygon)
-   or add points on the map (middle-click, or the **Add point** mode for touchpads and touch screens).
+   or add points on the map: middle-click, or **Add point** mode (a crosshair at the map centre plus an
+   explicit *Add point here* button – for touchpads and touch screens). A normal left click or tap
+   never adds a point, so panning cannot create points by accident.
    Your area is outlined in orange and everything outside it is dimmed.
 2. **Time period + phenomena** – pick dates and any of the 4 phenomena. For floods, an optional
    **flood event date** splits observations into a pre-event baseline and later observations.
@@ -28,13 +30,16 @@ satellite data**. Runs on **Cloudflare Workers**, no Google Earth Engine needed.
      pixels actually classified as water are drawn: newly inundated, normal water, or water with no
      baseline, with unobserved pixels hatched) or "NASA original" view. Tick **Show pre-event
      baseline** under the timeline to compare water before and after the event.
-   - **Map controls** – left-drag moves, right-drag rotates/tilts (no browser menu), the wheel zooms,
-     middle-click adds an AOI point. The **?** button on the map lists the controls.
+   - **Map controls** – left-drag moves (clicks never add points), right-drag rotates/tilts (no browser
+     menu), the wheel zooms, middle-click adds an AOI point. The **?** button on the map lists the controls.
    - **Interactive timeline** – a row per dataset showing every NASA acquisition (thin ticks), the
      analysed dates (circles coloured by intensity), water baseline observations (squares), the
      pre-event window, low-coverage dates (dashed) and failures (×). Drag the slider, click the
      timeline or press ▶ to play through time.
-   - **Chart** – detected km² per dataset over time (dashed = radar).
+   - **Event track** – above the satellite tracks, one row per phenomenon showing when the event
+     happened according to the observations (see *Event timeline* below). Click a band or use
+     **Before / During / After** to jump there; map, imagery, findings and chart follow.
+   - **Chart** – detected km² per dataset over time (dashed = radar); the selected event is shaded.
    - **Findings** – per phenomenon: km² and % of area, overall severity badge, trend since the
      first date, area per intensity level, and **area confirmed by 2+ independent sensors**.
      Floods: newly inundated km² and % of the *observable* area, normal/permanent vs new water,
@@ -81,6 +86,33 @@ Dataset definitions (layer IDs, CMR short names, intensity rules) live in
   (a backscatter drop, typical of forest clearing). This uses NASA's visualised radar imagery, so it is
   an indicator – for exact dB values use `extras/nisar_to_geotiff.py`.
 - **Fires**: every NASA fire-detection pixel counts.
+
+### Event timeline (how event dates are estimated)
+Events are built only from the analysed observations, one per phenomenon
+([`public/js/events.js`](public/js/events.js), unit-tested). No date is ever invented:
+- A date is **affected** when a valid observation shows the phenomenon (floods: new water with
+  ≥ 25 % valid coverage and a known baseline; fires: any VIIRS active-fire pixel; others: intensity
+  above "none"), **clear** when a valid observation shows it absent, otherwise **unknown**.
+  Several sources on the same date are merged: affected if any source saw it; disagreement is flagged.
+- **Onset** = the window between the last clear and the first affected observation
+  (e.g. dry on 10 Aug, flooded on 14 Aug → onset 10–14 Aug). With no earlier clear observation the
+  start is shown open-ended ("on or before …").
+- **Peak** = the highest observed value (not necessarily the true peak). Floods also show
+  **recession** (first later observation below half the peak).
+- **End / recovery** = the window between the last affected and the first later clear observation;
+  if there is none the event is shown as **ongoing / end not observed**.
+- Observations that cannot tell (no baseline, too little coverage) give an **uncertain** hatched band
+  with no dates. Dates in a window, or after the last observation of an ongoing event, are labelled
+  *uncertain* rather than before/after.
+- **Date confidence** (High / Medium / Low) depends on the onset window width, whether the end was
+  observed, the number of affected observations and independent sources.
+- For wildfires the last satellite detection is **not** containment (clouds, smoke and overpass
+  times hide fire). Officially **reported** dates (e.g. CAL FIRE's reported ignition and 100 %
+  containment of the Palisades Fire, NWS reports for the Texas floods) are attached to the examples
+  as separate, attributed markers. They are only shown while the example's area is unchanged and
+  the date is inside the period. They are never used to compute satellite dates.
+- Each event's source datasets, supporting observations, confidence, reasons and estimation method
+  are stored and included in the JSON export.
 
 ### How floods are measured (no severity scale)
 Water products are **categorical**, so they are never turned into Low/Moderate/High/Severe.
@@ -135,6 +167,7 @@ public/js/nasa.js       calls to /api (CMR, GIBS images, colour maps)
 public/js/app.js        globe/map, coordinate table, timeline, chart, findings, data-source indicators
 public/js/graticule.js  latitude/longitude grid lines + labels
 public/js/layout.js     draggable / resizable / collapsible panels
+public/js/events.js     event detection: onset / peak / end windows, phases (pure, unit-tested)
 public/js/tour.js       guided tour ("How to use EarthScope")
 public/js/glossary.js   plain-language tooltips for technical terms
 tests/                  unit tests + headless-browser end-to-end test

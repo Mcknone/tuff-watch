@@ -37,6 +37,8 @@ export const TERMS = {
     'Global Imagery Browse Services: NASA’s map imagery of its science products. The app reads its pixels using NASA’s published colour tables.'],
   AOI: ['Area of interest (AOI)',
     'The area you want analysed. One point makes a circle, two points a rectangle, three or more a polygon.'],
+  eventconf: ['Date confidence',
+    'How well the observations pin down WHEN the event happened. High: the start lies in a window of a week or less, the end was observed, and two or more sources saw it. Low: the start or end is not bounded by any observation.'],
   intensity: ['Intensity levels',
     'For vegetation loss, fire and chlorophyll the app groups NASA’s classes into Low / Moderate / High / Severe. Floods are not given a severity – see Confidence instead.']
 };
