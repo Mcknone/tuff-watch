@@ -1,0 +1,16 @@
+{
+  // Cloudflare Workers configuration
+  // Deploy: connect the GitHub repo in Cloudflare (Workers & Pages → Create →
+  // Import a repository). Build command: (empty)   Deploy command: npx wrangler deploy
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "earth-surface-monitor",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-10-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

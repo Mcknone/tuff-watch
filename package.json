@@ -1,0 +1,15 @@
+{
+  "name": "earth-surface-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NASA Space Apps – monitor Earth surface change (deforestation, floods, fires, algae) with NASA SAR and optical data. Runs on Cloudflare Workers.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node tests/classify.test.mjs && node tests/worker.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
