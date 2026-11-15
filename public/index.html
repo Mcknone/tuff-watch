@@ -6,7 +6,7 @@
   <title>Earth Surface Change Monitor · NASA Space Apps</title>
   <meta name="description" content="Monitor deforestation, floods, fires and algae blooms with real NASA SAR and optical satellite data.">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛰️</text></svg>">
-  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -18,126 +18,172 @@
         <p>Deforestation · floods · fires · algae blooms — from NASA radar (SAR) and optical satellites</p>
       </div>
     </div>
-    <div class="live-pill" id="live-pill" title="All imagery and catalogue data come from NASA services">
-      <span class="dot"></span> Real NASA data · GIBS + CMR
+    <div class="top-actions">
+      <button type="button" id="reset-layout" class="top-btn" title="Put every panel back in its original place">Reset layout</button>
+      <div class="live-pill" id="live-pill" title="All imagery and catalogue data come from NASA services">
+        <span class="dot"></span> Real NASA data · GIBS + CMR
+      </div>
     </div>
   </header>
 
-  <main class="layout">
-    <!-- ========================= LEFT: controls ========================= -->
-    <aside class="sidebar">
-      <section class="card">
-        <h2><span class="step">1</span> Area of interest</h2>
-        <p class="hint">Latitude, longitude in decimal degrees. 1 point = circle · 2 points = rectangle · 3+ = polygon.</p>
-        <table class="coords">
-          <thead><tr><th>#</th><th>Latitude</th><th>Longitude</th><th></th></tr></thead>
-          <tbody id="coord-body"></tbody>
-        </table>
-        <div class="row-buttons">
-          <button id="add-row" type="button">+ Add point</button>
-          <button id="clear-rows" type="button" class="ghost">Clear</button>
-          <label class="toggle"><input type="checkbox" id="pick-mode"> Click map to add</label>
-        </div>
-        <label class="inline">Radius for one point
-          <input type="number" id="radius" value="10" min="0.5" max="100" step="0.5"> km</label>
-        <div id="aoi-info" class="aoi-info"></div>
-        <label class="inline">Example
-          <select id="examples"><option value="">— load a real event —</option></select></label>
-      </section>
+  <main class="layout" id="layout">
+    <!-- Docks: panels can be dragged by their title bar into any of these four sides. -->
+    <div class="dock dock-v" id="dock-left" data-side="left"><div class="resizer" data-side="left" title="Drag to resize"></div>
+      <!-- ========================= controls panel ========================= -->
+      <section class="panel" id="panel-controls" data-panel="controls" data-default="left">
+        <header class="panel-head" title="Drag to move this panel to another side of the map">
+          <span class="grip" aria-hidden="true">⠿</span><h2>Analysis setup</h2>
+          <button type="button" class="p-btn p-move" title="Move panel to…" aria-haspopup="menu">⇆</button>
+          <button type="button" class="p-btn p-collapse" title="Collapse panel" aria-expanded="true">–</button>
+        </header>
+        <div class="panel-body sidebar">
+          <section class="card">
+            <h2><span class="step">1</span> Area of interest</h2>
+            <p class="hint">Latitude, longitude in decimal degrees. 1 point = circle · 2 points = rectangle · 3+ = polygon.</p>
+            <table class="coords">
+              <thead><tr><th>#</th><th>Latitude</th><th>Longitude</th><th></th></tr></thead>
+              <tbody id="coord-body"></tbody>
+            </table>
+            <div class="row-buttons">
+              <button id="add-row" type="button">+ Add point</button>
+              <button id="clear-rows" type="button" class="ghost">Clear</button>
+              <label class="toggle"><input type="checkbox" id="pick-mode"> Click map to add</label>
+            </div>
+            <label class="inline">Radius for one point
+              <input type="number" id="radius" value="10" min="0.5" max="100" step="0.5"> km</label>
+            <div id="aoi-info" class="aoi-info"></div>
+            <label class="inline">Example
+              <select id="examples"><option value="">— load a real event —</option></select></label>
+          </section>
 
-      <section class="card">
-        <h2><span class="step">2</span> Time period</h2>
-        <div class="dates">
-          <label>From <input type="date" id="start"></label>
-          <label>To <input type="date" id="end"></label>
-        </div>
-        <div class="dates">
-          <label>Dates per dataset
-            <select id="samples">
-              <option value="4">4 (fast)</option>
-              <option value="6">6</option>
-              <option value="8" selected>8</option>
-              <option value="12">12 (detailed)</option>
-            </select></label>
-          <label>Detail
-            <select id="detail">
-              <option value="384">Fast</option>
-              <option value="512" selected>Standard</option>
-              <option value="896">High</option>
-            </select></label>
-        </div>
-      </section>
+          <section class="card">
+            <h2><span class="step">2</span> Time period</h2>
+            <div class="dates">
+              <label>From <input type="date" id="start"></label>
+              <label>To <input type="date" id="end"></label>
+            </div>
+            <div class="dates">
+              <label>Dates per dataset
+                <select id="samples">
+                  <option value="4">4 (fast)</option>
+                  <option value="6">6</option>
+                  <option value="8" selected>8</option>
+                  <option value="12">12 (detailed)</option>
+                </select></label>
+              <label>Detail
+                <select id="detail">
+                  <option value="384">Fast</option>
+                  <option value="512" selected>Standard</option>
+                  <option value="896">High</option>
+                </select></label>
+            </div>
+          </section>
 
-      <section class="card">
-        <h2><span class="step">3</span> Phenomena</h2>
-        <div id="phenomena" class="phenomena"></div>
-      </section>
+          <section class="card">
+            <h2><span class="step">3</span> Phenomena</h2>
+            <div id="phenomena" class="phenomena"></div>
+          </section>
 
-      <button id="analyze" class="primary" type="button">▶ Analyse with NASA data</button>
-      <div class="progress"><div id="progress-bar"></div></div>
-      <div id="status" class="status" role="status"></div>
-    </aside>
-
-    <!-- ========================= CENTRE: map + timeline ================= -->
-    <section class="center">
-      <div class="map-wrap">
-        <div id="map"></div>
-        <div class="map-tools">
-          <div class="seg" role="group" aria-label="Map view">
-            <button type="button" data-view="classified" class="on">Classified intensity</button>
-            <button type="button" data-view="original">NASA original colours</button>
+          <div class="run-box">
+            <button id="analyze" class="primary" type="button">▶ Analyse with NASA data</button>
+            <div class="progress"><div id="progress-bar"></div></div>
+            <div id="status" class="status" role="status"></div>
           </div>
-          <select id="basemap" title="Base map">
-            <option value="osm">Street map</option>
-            <option value="esri">Satellite (Esri)</option>
-          </select>
-          <select id="context" title="NASA context imagery at the selected date">
-            <option value="">No context imagery</option>
-          </select>
         </div>
-        <div id="legend" class="legend"></div>
-      </div>
+      </section>
+    </div>
+    <div class="dock dock-h" id="dock-top" data-side="top"><div class="resizer" data-side="top" title="Drag to resize"></div></div>
 
-      <div class="timeline">
-        <div class="tl-controls">
-          <button id="play" type="button" title="Play through dates" disabled>▶</button>
-          <input type="range" id="slider" min="0" max="0" value="0" disabled>
-          <div class="tl-date"><b id="tl-date">—</b><span id="tl-sub">Run an analysis to build the timeline</span></div>
+    <!-- ========================= MAP (3D globe) ========================= -->
+    <section class="map-wrap" id="map-wrap">
+      <div id="map"></div>
+      <div class="map-tools">
+        <div class="seg" role="group" aria-label="Map view">
+          <button type="button" data-view="classified" class="on">Classified intensity</button>
+          <button type="button" data-view="original">NASA original colours</button>
         </div>
-        <div class="tl-body">
-          <svg id="tl-svg" role="img" aria-label="Acquisition timeline"></svg>
-          <div class="chart-box"><canvas id="chart"></canvas></div>
+        <select id="basemap" title="Base map">
+          <option value="hybrid">Satellite + labels</option>
+          <option value="esri">Satellite</option>
+          <option value="osm">Street map</option>
+        </select>
+        <select id="context" title="NASA context imagery at the selected date">
+          <option value="">No context imagery</option>
+        </select>
+        <div class="globe-tools" role="group" aria-label="Globe settings">
+          <div class="seg" role="group" aria-label="Projection">
+            <button type="button" data-proj="globe" class="on" title="3D globe">🌍 Globe</button>
+            <button type="button" data-proj="mercator" title="Flat map">▭ Flat</button>
+          </div>
+          <label class="chk" title="Show latitude and longitude lines"><input type="checkbox" id="graticule"> Lat/Lon grid</label>
+          <label class="chk" title="Show mountains and valleys in 3D (tilt with right-drag or Ctrl+drag)"><input type="checkbox" id="terrain"> 3D terrain</label>
         </div>
       </div>
+      <div id="legend" class="legend"></div>
     </section>
 
-    <!-- ========================= RIGHT: results ========================= -->
-    <aside class="results">
-      <div class="tabs" role="tablist">
-        <button type="button" class="on" data-tab="findings">Findings</button>
-        <button type="button" data-tab="sources">Data sources</button>
-      </div>
-      <div id="findings" class="tab-panel">
-        <div class="empty">
-          <p><b>How it works</b></p>
-          <ol>
-            <li>Enter coordinates (or load an example).</li>
-            <li>Pick a time period and phenomena.</li>
-            <li>Press <b>Analyse</b>. The app finds the real satellite acquisitions over your area in NASA's catalogue,
-              downloads NASA's science imagery for each date, and measures every pixel.</li>
-          </ol>
-          <p>Colours: each phenomenon has its own colour family; <b>darker = more intense</b>.</p>
+    <div class="dock dock-h" id="dock-bottom" data-side="bottom"><div class="resizer" data-side="bottom" title="Drag to resize"></div>
+      <!-- ========================= timeline panel ================= -->
+      <section class="panel" id="panel-timeline" data-panel="timeline" data-default="bottom">
+        <header class="panel-head" title="Drag to move this panel to another side of the map">
+          <span class="grip" aria-hidden="true">⠿</span><h2>Timeline</h2>
+          <button type="button" class="p-btn p-move" title="Move panel to…" aria-haspopup="menu">⇆</button>
+          <button type="button" class="p-btn p-collapse" title="Collapse panel" aria-expanded="true">–</button>
+        </header>
+        <div class="panel-body timeline">
+          <div class="tl-controls">
+            <button id="play" type="button" title="Play through dates" disabled>▶</button>
+            <input type="range" id="slider" min="0" max="0" value="0" disabled>
+            <div class="tl-date"><b id="tl-date">—</b><span id="tl-sub">Run an analysis to build the timeline</span></div>
+          </div>
+          <div class="tl-body">
+            <svg id="tl-svg" role="img" aria-label="Acquisition timeline"></svg>
+            <div class="chart-box"><canvas id="chart"></canvas></div>
+          </div>
         </div>
-      </div>
-      <div id="sources" class="tab-panel hidden"></div>
-      <div class="exports">
-        <button type="button" id="export-csv" disabled>⬇ CSV</button>
-        <button type="button" id="export-json" disabled>⬇ JSON</button>
-      </div>
-    </aside>
+      </section>
+    </div>
+    <div class="dock dock-v" id="dock-right" data-side="right"><div class="resizer" data-side="right" title="Drag to resize"></div>
+      <!-- ========================= results panel ========================= -->
+      <section class="panel" id="panel-results" data-panel="results" data-default="right">
+        <header class="panel-head" title="Drag to move this panel to another side of the map">
+          <span class="grip" aria-hidden="true">⠿</span><h2>Results</h2>
+          <button type="button" class="p-btn p-move" title="Move panel to…" aria-haspopup="menu">⇆</button>
+          <button type="button" class="p-btn p-collapse" title="Collapse panel" aria-expanded="true">–</button>
+        </header>
+        <div class="panel-body results">
+          <div class="tabs" role="tablist">
+            <button type="button" class="on" data-tab="findings">Findings</button>
+            <button type="button" data-tab="sources">Data sources</button>
+          </div>
+          <div id="findings" class="tab-panel">
+            <div class="empty">
+              <p><b>How it works</b></p>
+              <ol>
+                <li>Enter coordinates (or load an example).</li>
+                <li>Pick a time period and phenomena.</li>
+                <li>Press <b>Analyse</b>. The app finds the real satellite acquisitions over your area in NASA's catalogue,
+                  downloads NASA's science imagery for each date, and measures every pixel.</li>
+              </ol>
+              <p>Colours: each phenomenon has its own colour family; <b>darker = more intense</b>.</p>
+            </div>
+          </div>
+          <div id="sources" class="tab-panel hidden"></div>
+          <div class="exports">
+            <button type="button" id="export-csv" disabled>⬇ CSV</button>
+            <button type="button" id="export-json" disabled>⬇ JSON</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="drop-zones" aria-hidden="true">
+      <div class="drop-preview"></div>
+      <div class="drop-ghost"></div>
+    </div>
   </main>
 
-  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script type="module" src="js/app.js"></script>
 </body>

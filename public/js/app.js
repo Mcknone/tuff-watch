@@ -10,6 +10,8 @@ import {
   limiter, fetchCmr, fetchColormapXml, fetchPixels, imageCoverage, tileUrl,
   earthdataSearchUrl, worldviewUrl
 } from './nasa.js';
+import { graticuleGeoJSON, GRATICULE_RANKS } from './graticule.js';
+import { initLayout } from './layout.js';
 
 const $ = sel => document.querySelector(sel);
 const fmtKm = v => (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
@@ -28,10 +30,31 @@ const state = {
 };
 
 // ============================================================ map set-up
+// A 3D globe (MapLibre globe projection) with an atmosphere, like Google Earth.
+const prefs = (() => {
+  try { return JSON.parse(localStorage.getItem('esm-map-prefs') || '{}') || {}; } catch { return {}; }
+})();
+const savePrefs = () => { try { localStorage.setItem('esm-map-prefs', JSON.stringify(prefs)); } catch { /* ignore */ } };
+
+const ATMOSPHERE = {
+  'sky-color': '#7fb4ff',
+  'horizon-color': '#dceaff',
+  'fog-color': '#ffffff',
+  'sky-horizon-blend': 0.6,
+  'horizon-fog-blend': 0.8,
+  'fog-ground-blend': 0.9,
+  // full atmosphere glow when you see the whole planet, fading out as you zoom in
+  'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 1, 5, 1, 7, 0]
+};
+
 const map = new maplibregl.Map({
   container: 'map',
   style: {
     version: 8,
+    projection: { type: prefs.projection === 'mercator' ? 'mercator' : 'globe' },
+    sky: ATMOSPHERE,
+    light: { anchor: 'map', position: [1.5, 90, 80] },
+    glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
     sources: {
       osm: {
         type: 'raster', tileSize: 256, maxzoom: 19,
@@ -42,31 +65,47 @@ const map = new maplibregl.Map({
         type: 'raster', tileSize: 256, maxzoom: 19,
         tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
         attribution: 'Imagery © Esri, Maxar, Earthstar Geographics'
+      },
+      'esri-ref': {
+        type: 'raster', tileSize: 256, maxzoom: 19,
+        tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'],
+        attribution: 'Labels © Esri'
       }
     },
     layers: [
-      { id: 'base-osm', type: 'raster', source: 'osm' },
-      { id: 'base-esri', type: 'raster', source: 'esri', layout: { visibility: 'none' } }
+      { id: 'base-osm', type: 'raster', source: 'osm', layout: { visibility: 'none' } },
+      { id: 'base-esri', type: 'raster', source: 'esri' },
+      { id: 'base-esri-ref', type: 'raster', source: 'esri-ref' }
     ]
   },
   center: [10, 15],
-  zoom: 1.6,
+  zoom: 1.4,
+  maxPitch: 80,
   attributionControl: { compact: true, customAttribution: 'Science data: NASA GIBS / CMR' }
 });
-map.addControl(new maplibregl.NavigationControl(), 'top-right');
+map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
 map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-right');
 
 const mapReady = new Promise(resolve => map.on('load', resolve));
+
+// Keep the map (and timeline drawing) sized to its box when panels move or resize.
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => map.resize()).observe($('#map-wrap'));
+}
 
 mapReady.then(() => {
   const empty = { type: 'FeatureCollection', features: [] };
   map.addSource('mask', { type: 'geojson', data: empty });
   map.addSource('aoi', { type: 'geojson', data: empty });
   map.addLayer({ id: 'mask-fill', type: 'fill', source: 'mask', paint: { 'fill-color': '#0b1d33', 'fill-opacity': 0.45 } });
+  addGraticuleLayers();
   map.addLayer({ id: 'aoi-line', type: 'line', source: 'aoi', paint: { 'line-color': '#ff7a00', 'line-width': 3 } });
   map.addLayer({ id: 'aoi-pts', type: 'circle', source: 'aoi', filter: ['==', '$type', 'Point'],
     paint: { 'circle-radius': 5, 'circle-color': '#ff7a00', 'circle-stroke-color': '#fff', 'circle-stroke-width': 2 } });
-  updateAoi(true);
+  applyBasemap();
+  setGraticule($('#graticule').checked);
+  setTerrain($('#terrain').checked);
+  updateAoi(false);   // init() already started the first fly-to
 });
 
 map.on('click', e => {
@@ -82,9 +121,96 @@ map.on('click', e => {
   updateAoi(false);
 });
 
+// ---- base map
+if (prefs.basemap) $('#basemap').value = prefs.basemap;
+function applyBasemap() {
+  const v = $('#basemap').value;
+  map.setLayoutProperty('base-osm', 'visibility', v === 'osm' ? 'visible' : 'none');
+  map.setLayoutProperty('base-esri', 'visibility', v === 'osm' ? 'none' : 'visible');
+  map.setLayoutProperty('base-esri-ref', 'visibility', v === 'hybrid' ? 'visible' : 'none');
+}
 $('#basemap').addEventListener('change', e => {
-  map.setLayoutProperty('base-osm', 'visibility', e.target.value === 'osm' ? 'visible' : 'none');
-  map.setLayoutProperty('base-esri', 'visibility', e.target.value === 'esri' ? 'visible' : 'none');
+  prefs.basemap = e.target.value; savePrefs();
+  mapReady.then(applyBasemap);
+});
+
+// ---- globe / flat projection
+function setProjection(type) {
+  document.querySelectorAll('[data-proj]').forEach(b => b.classList.toggle('on', b.dataset.proj === type));
+  prefs.projection = type; savePrefs();
+  mapReady.then(() => map.setProjection({ type }));
+}
+document.querySelectorAll('[data-proj]').forEach(b => b.addEventListener('click', () => setProjection(b.dataset.proj)));
+document.querySelectorAll('[data-proj]').forEach(b => b.classList.toggle('on', b.dataset.proj === (prefs.projection === 'mercator' ? 'mercator' : 'globe')));
+
+// ---- latitude / longitude grid
+const GRAT_LINE = r => `grat-line-${r}`, GRAT_LABEL = r => `grat-label-${r}`;
+function addGraticuleLayers() {
+  map.addSource('graticule', { type: 'geojson', data: graticuleGeoJSON() });
+  GRATICULE_RANKS.forEach((rk, r) => {
+    map.addLayer({
+      id: GRAT_LINE(r), type: 'line', source: 'graticule', minzoom: rk.minzoom,
+      filter: ['==', ['get', 'rank'], r],
+      layout: { visibility: 'none' },
+      paint: {
+        'line-color': ['case', ['get', 'major'], '#ffd166', '#ffffff'],
+        'line-opacity': ['case', ['get', 'major'], 0.9, r === 0 ? 0.55 : 0.35],
+        'line-width': ['case', ['get', 'major'], 1.6, r === 0 ? 1 : 0.7]
+      }
+    });
+    map.addLayer({
+      id: GRAT_LABEL(r), type: 'symbol', source: 'graticule', minzoom: rk.minzoom,
+      filter: ['==', ['get', 'rank'], r],
+      layout: {
+        visibility: 'none',
+        'symbol-placement': 'line',
+        'symbol-spacing': 320,
+        'text-field': ['get', 'label'],
+        'text-font': ['Open Sans Semibold'],
+        'text-size': 11,
+        'text-keep-upright': true,
+        'text-max-angle': 30
+      },
+      paint: {
+        'text-color': ['case', ['get', 'major'], '#ffd166', '#ffffff'],
+        'text-halo-color': 'rgba(4,10,25,.85)',
+        'text-halo-width': 1.4
+      }
+    });
+  });
+}
+function setGraticule(on) {
+  GRATICULE_RANKS.forEach((_, r) => {
+    map.setLayoutProperty(GRAT_LINE(r), 'visibility', on ? 'visible' : 'none');
+    map.setLayoutProperty(GRAT_LABEL(r), 'visibility', on ? 'visible' : 'none');
+  });
+}
+$('#graticule').checked = !!prefs.graticule;
+$('#graticule').addEventListener('change', e => {
+  prefs.graticule = e.target.checked; savePrefs();
+  mapReady.then(() => setGraticule(e.target.checked));
+});
+
+// ---- 3D terrain (open elevation tiles from the AWS Terrain Tiles dataset)
+function setTerrain(on) {
+  if (on) {
+    if (!map.getSource('dem')) {
+      map.addSource('dem', {
+        type: 'raster-dem', tileSize: 256, maxzoom: 14, encoding: 'terrarium',
+        tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
+        attribution: 'Elevation: AWS Terrain Tiles (SRTM, GMTED, ETOPO1)'
+      });
+    }
+    map.setTerrain({ source: 'dem', exaggeration: 1.5 });
+    if (map.getPitch() < 30 && map.getZoom() > 6) map.easeTo({ pitch: 55, duration: 900 });
+  } else {
+    map.setTerrain(null);
+  }
+}
+$('#terrain').checked = !!prefs.terrain;
+$('#terrain').addEventListener('change', e => {
+  prefs.terrain = e.target.checked; savePrefs();
+  mapReady.then(() => setTerrain(e.target.checked));
 });
 
 // ============================================================ coordinate table
@@ -157,6 +283,7 @@ function approxAreaKm2(poly) {
   return Math.abs(a / 2);
 }
 
+let firstFit = true;
 async function updateAoi(fit) {
   const info = $('#aoi-info');
   const aoi = buildAoi();
@@ -186,7 +313,12 @@ async function updateAoi(fit) {
     geometry: { type: 'Polygon', coordinates: [[[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]], [...aoi.polygon].reverse()] },
     properties: {}
   });
-  if (fit !== false) map.fitBounds([[aoi.bbox[0], aoi.bbox[1]], [aoi.bbox[2], aoi.bbox[3]]], { padding: 60, duration: 600 });
+  if (fit !== false) {
+    // first view: fly in from the whole globe, like Google Earth
+    const duration = firstFit ? 3200 : 1200;
+    firstFit = false;
+    map.fitBounds([[aoi.bbox[0], aoi.bbox[1]], [aoi.bbox[2], aoi.bbox[3]]], { padding: 60, duration, essential: true });
+  }
 }
 
 $('#add-row').addEventListener('click', () => addRow());
@@ -505,7 +637,8 @@ function drawTimelineSvg() {
     selectDate(best);
   };
 }
-window.addEventListener('resize', () => drawTimelineSvg());
+if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => drawTimelineSvg()).observe($('#tl-svg'));
+else window.addEventListener('resize', () => drawTimelineSvg());
 
 function buildChart() {
   if (state.chart) state.chart.destroy();
@@ -623,8 +756,8 @@ function classifiedImage(date) {
   return canvas.toDataURL('image/png');
 }
 
-document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => {
-  document.querySelectorAll('.seg button').forEach(x => x.classList.toggle('on', x === b));
+document.querySelectorAll('.seg button[data-view]').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.seg button[data-view]').forEach(x => x.classList.toggle('on', x === b));
   state.view = b.dataset.view;
   renderMapLayers();
   renderLegend();
@@ -787,6 +920,7 @@ $('#export-json').addEventListener('click', () => {
 
 // ============================================================ start-up
 (function init() {
+  initLayout(() => { if (state.chart) state.chart.resize(); });
   const end = today();
   const start = new Date(Date.now() - 180 * 86400000).toISOString().slice(0, 10);
   $('#start').value = start;
