@@ -1,25 +1,30 @@
 // =============================================================================
 // EarthScope – main app
 // =============================================================================
-import { PHENOMENA, LEVELS, DATASETS, CONTEXT_LAYERS, EXAMPLES, WATER_CODES, WATER_LABEL_RULES, SOURCE_NOTES } from './config.js';
+import { PHENOMENA, LEVELS, DATASETS, CONTEXT_LAYERS, EXAMPLES, WATER_CODES, SOURCE_NOTES, VEG_SENSITIVITY } from './config.js';
 import {
   OUT, parseColormap, buildClassifier, makeGrid, classifyPixels, luminance, sarLevels,
   frameStats, combine, overallLevel, sampleDates, dailyDates,
-  W_NAMES, buildWaterClassifier, classifyWater, waterBaseline, waterStatus, waterStats,
-  waterAgreement, waterConfidence, buildValueClassifier, valueStats
+  W, W_NAMES, waterBaseline, waterStatus, waterStats,
+  waterAgreement, waterConfidence, buildValueClassifier, valueStats, FLOOD_SIGNAL, floodSignal, baselineFrames
 } from './classify.js';
 import {
   limiter, fetchCmr, fetchColormapXml, fetchPixels, imageCoverage, tileUrl,
-  earthdataSearchUrl, worldviewUrl
+  earthdataSearchUrl, worldviewUrl, fetchGranules, openRemoteTiff, withTimeout
 } from './nasa.js';
 import { graticuleGeoJSON, GRATICULE_RANKS } from './graticule.js';
 import { initLayout, revealPanel } from './layout.js';
 import { initTour, startTour } from './tour.js';
 import { initTerms } from './glossary.js';
 import { mergeByDate, detectEvent, phaseOf, phaseTargets, recordsInPeriod, daysBetween } from './events.js';
+import { metricCircle, selfIntersects, ringAreaKm2, makeMetricGrid } from './geo.js';
+import { readWindow, sampleGranule, newTarget, decodeDist, decodeWater, valueHistogram, DIST_STATUS_NAMES } from './raster.js';
+import { classifyGesture } from './pointer.js';
 
 const $ = sel => document.querySelector(sel);
-const fmtKm = v => (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
+// Area formatting never rounds a real detection to zero: one 30 m pixel is 0.0009 km².
+const fmtKm = v => (v == null || !Number.isFinite(v) ? '—' : v === 0 ? '0' : v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1)
+  : v >= 0.01 ? v.toFixed(2) : v.toPrecision(2));
 const today = () => new Date().toISOString().slice(0, 10);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -121,65 +126,107 @@ mapReady.then(() => {
   updateAoi(false);   // init() already started the first fly-to
 });
 
-// ---- mouse & touch controls
-// Left-drag: pan (MapLibre default) · right-drag: rotate / tilt (MapLibre default)
-// Wheel: zoom (unchanged) · middle click: add an AOI point · "Add point" mode: click / tap adds a point.
+// ---- mouse, touch & pen controls (one handler decides once per gesture)
+// Left-drag: pan · right-drag: rotate / tilt · wheel: zoom (MapLibre defaults, unchanged)
+// Middle click: add one AOI point · Add-point mode: a normal click / tap adds one point,
+// or "Add point here" adds the point under the centre crosshair.
+// A drag, a multi-touch gesture or a press on a control/marker never adds a point.
 map.dragRotate.enable();
 map.touchZoomRotate.enable();
 map.touchPitch.enable();
 const canvasBox = map.getCanvasContainer();
-canvasBox.addEventListener('contextmenu', e => e.preventDefault());     // right-drag must not open the menu
-let middle = null;
-canvasBox.addEventListener('mousedown', e => {
-  if (e.button !== 1) return;
-  e.preventDefault();                                                    // no browser auto-scroll
-  middle = { x: e.clientX, y: e.clientY };
+const gestures = new Map();          // pointerId -> { button, x, y, t, type, maxMove }
+let multiTouch = false;
+canvasBox.addEventListener('contextmenu', e => e.preventDefault());      // right-drag must not open the menu
+canvasBox.addEventListener('mousedown', e => { if (e.button === 1) e.preventDefault(); });   // no auto-scroll
+canvasBox.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });    // no paste (Linux)
+canvasBox.addEventListener('pointerdown', e => {
+  if (e.target !== map.getCanvas()) return;                              // markers, popups: not the map
+  gestures.set(e.pointerId, { button: e.button, x: e.clientX, y: e.clientY, t: performance.now(), type: e.pointerType, maxMove: 0 });
+  if (gestures.size > 1) multiTouch = true;
 });
-canvasBox.addEventListener('mouseup', e => {
-  if (e.button !== 1 || !middle) return;
-  e.preventDefault();
-  const moved = Math.hypot(e.clientX - middle.x, e.clientY - middle.y);
-  middle = null;
-  if (moved > 6) return;
-  const r = map.getCanvas().getBoundingClientRect();
-  addPointAt(map.unproject([e.clientX - r.left, e.clientY - r.top]));
+canvasBox.addEventListener('pointermove', e => {
+  const g = gestures.get(e.pointerId);
+  if (g) g.maxMove = Math.max(g.maxMove, Math.hypot(e.clientX - g.x, e.clientY - g.y));
 });
-canvasBox.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });   // no paste on Linux
+const endGesture = e => {
+  const g = gestures.get(e.pointerId);
+  gestures.delete(e.pointerId);
+  const wasMulti = multiTouch;
+  if (!gestures.size) multiTouch = false;
+  if (!g || e.type === 'pointercancel') return;
+  g.maxMove = Math.max(g.maxMove, Math.hypot(e.clientX - g.x, e.clientY - g.y));
+  const kind = classifyGesture(g, { t: performance.now(), multi: wasMulti });
+  if (kind !== 'click') return;
+  if (g.button === 1 || (g.button === 0 && picking)) {
+    const ll = lngLatAtClient(e.clientX, e.clientY);
+    if (!ll) { toast('That spot is not on the Earth’s surface – no point added.'); return; }
+    addPointAt(ll);
+  }
+};
+canvasBox.addEventListener('pointerup', endGesture);
+canvasBox.addEventListener('pointercancel', endGesture);
 
-// Left click / tap NEVER adds a point (it only moves the map). Points come from a
-// middle click, or from "Add point" mode: a crosshair at the map centre plus an
-// explicit "Add point here" button – so panning can never create points by accident.
+/** Screen position → lon/lat, or null when the click is off the globe / outside the map. */
+function lngLatAtClient(cx, cy) {
+  const r = map.getCanvas().getBoundingClientRect();
+  const px = [cx - r.left, cy - r.top];
+  const ll = map.unproject(px);
+  if (!ll || !Number.isFinite(ll.lng) || !Number.isFinite(ll.lat) || Math.abs(ll.lat) > 85.05) return null;
+  const back = map.project(ll);        // on the 3D globe, space next to the Earth unprojects to the horizon
+  if (!back || Math.hypot(back.x - px[0], back.y - px[1]) > 3) return null;
+  return ll;
+}
+
 let picking = false;
 function setPickMode(on) {
   picking = on;
   for (const b of [$('#pick-btn'), $('#pick-mode')]) { b.setAttribute('aria-pressed', String(on)); b.classList.toggle('on', on); }
   $('#crosshair').hidden = !on;
   $('#pick-bar').hidden = !on;
+  $('#map-wrap').classList.toggle('picking', on);
+  if (on) map.doubleClickZoom.disable(); else map.doubleClickZoom.enable();   // two quick clicks = two points, no zoom
   if (on) $('#pick-add').focus();
 }
 $('#pick-btn').addEventListener('click', () => setPickMode(!picking));
 $('#pick-mode').addEventListener('click', () => setPickMode(!picking));
 $('#pick-add').addEventListener('click', () => addPointAt(map.getCenter()));
+$('#pick-undo').addEventListener('click', () => {
+  const rows = [...document.querySelectorAll('#coord-body tr')].filter(r => r.querySelector('.lat').value || r.querySelector('.lon').value);
+  const last = rows.at(-1);
+  if (!last) return;
+  last.remove(); if (!document.querySelector('#coord-body tr')) addRow();
+  renumber(); updateAoi(false); toast('Last point removed');
+});
 $('#pick-done').addEventListener('click', () => { setPickMode(false); $('#pick-btn').focus(); });
-$('#pick-bar').addEventListener('keydown', e => { if (e.key === 'Escape') { setPickMode(false); $('#pick-btn').focus(); } });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && picking) { setPickMode(false); $('#pick-btn').focus(); } });
 
+/** Append one AOI point (lat/lon never swapped: rows are [lat, lon], map gives {lng, lat}). */
 function addPointAt(lngLat) {
-  const lng = ((lngLat.lng + 540) % 360) - 180;
+  const lng = ((lngLat.lng + 540) % 360) - 180, lat = lngLat.lat;
+  if (!(lat >= -90 && lat <= 90) || !Number.isFinite(lng)) { toast('Invalid location – no point added.'); return; }
+  const filled = [...document.querySelectorAll('#coord-body tr')].filter(r => r.querySelector('.lat').value !== '' || r.querySelector('.lon').value !== '');
+  const prev = filled.at(-1);
+  if (prev && Math.abs(+prev.querySelector('.lat').value - lat) < 1e-5 && Math.abs(+prev.querySelector('.lon').value - lng) < 1e-5) {
+    toast('Same location as the previous point – not added twice.');
+    return;
+  }
+  // new points always go to the END of the list (an empty row is only reused if it is the last one)
   const rows = [...document.querySelectorAll('#coord-body tr')];
-  const empty = rows.find(r => !r.querySelector('.lat').value && !r.querySelector('.lon').value);
-  if (empty) {
-    empty.querySelector('.lat').value = lngLat.lat.toFixed(5);
-    empty.querySelector('.lon').value = lng.toFixed(5);
+  const last = rows.at(-1);
+  if (last && last.querySelector('.lat').value === '' && last.querySelector('.lon').value === '') {
+    last.querySelector('.lat').value = lat.toFixed(5);
+    last.querySelector('.lon').value = lng.toFixed(5);
   } else {
-    addRow(lngLat.lat.toFixed(5), lng.toFixed(5));
+    addRow(lat.toFixed(5), lng.toFixed(5));
   }
   updateAoi(false);
-  const n = document.querySelectorAll('#coord-body tr').length;
+  const n = filled.length + 1;
   const el = document.createElement('div');
   el.className = 'point-pulse';
-  const mk = new maplibregl.Marker({ element: el }).setLngLat([lng, lngLat.lat]).addTo(map);
+  const mk = new maplibregl.Marker({ element: el }).setLngLat([lng, lat]).addTo(map);
   setTimeout(() => mk.remove(), 1400);
-  toast(`Point ${n} added at ${lngLat.lat.toFixed(4)}, ${lng.toFixed(4)}`);
+  toast(`Point ${n} added at ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
 }
 
 let toastTimer = null;
@@ -194,8 +241,8 @@ function toast(msg) {
 // control legend (mouse vs touch wording)
 const coarse = matchMedia('(pointer: coarse)').matches;
 $('#controls-help').innerHTML = coarse
-  ? '<b>Map controls</b><span>One finger: move</span><span>Two fingers: zoom, rotate, tilt</span><span>Tapping never adds points. Use <b>Add point</b>: move the map under the crosshair, then press <b>Add point here</b>.</span>'
-  : '<b>Map controls</b><span><kbd>Left-drag</kbd> move (clicks never add points)</span><span><kbd>Right-drag</kbd> rotate / tilt</span><span><kbd>Wheel</kbd> zoom</span><span><kbd>Middle-click</kbd> add AOI point</span><span>No middle button? <b>Add point</b> shows a crosshair to place points.</span>';
+  ? '<b>Map controls</b><span>One finger: move</span><span>Two fingers: zoom, rotate, tilt</span><span>Tapping adds a point only in <b>Add point</b> mode (or use the crosshair and <b>Add point here</b>).</span>'
+  : '<b>Map controls</b><span><kbd>Left-drag</kbd> move – a click adds a point only in <b>Add point</b> mode</span><span><kbd>Right-drag</kbd> rotate / tilt</span><span><kbd>Wheel</kbd> zoom</span><span><kbd>Middle-click</kbd> add AOI point</span><span><kbd>Esc</kbd> leave Add-point mode</span>';
 $('#help-toggle').addEventListener('click', () => {
   const box = $('#controls-help');
   const show = box.hidden;
@@ -332,13 +379,10 @@ function buildAoi() {
   let polygon, kind;
   if (pts.length === 1) {
     const km = parseFloat($('#radius').value);
-    if (!(km > 0)) return { error: 'Radius must be a positive number of km.' };
+    if (!(km > 0) || km > 500) return { error: 'Radius must be between 0 and 500 km.' };
     const [lon, lat] = pts[0];
-    polygon = [];
-    for (let k = 0; k <= 64; k++) {
-      const a = (k / 64) * 2 * Math.PI;
-      polygon.push([lon + (km / (111.32 * Math.cos((lat * Math.PI) / 180))) * Math.cos(a), lat + (km / 110.57) * Math.sin(a)]);
-    }
+    if (Math.abs(lat) > 84) return { error: 'Circles are supported up to 84° latitude (UTM limit).' };
+    polygon = metricCircle(lon, lat, km);        // built in metres, not by adding km to degrees
     kind = `circle, ${km} km radius`;
   } else if (pts.length === 2) {
     const [a, b] = pts;
@@ -349,6 +393,7 @@ function buildAoi() {
     kind = 'rectangle';
   } else {
     polygon = [...pts, pts[0]];
+    if (selfIntersects(polygon)) return { error: 'The polygon’s edges cross each other. Reorder the points so they go around the area in one direction.' };
     kind = `polygon, ${pts.length} corners`;
   }
   const lons = polygon.map(p => p[0]), lats = polygon.map(p => p[1]);
@@ -357,13 +402,6 @@ function buildAoi() {
   return { polygon, bbox, kind, points: pts };
 }
 
-function approxAreaKm2(poly) {
-  const lat0 = poly.reduce((s, p) => s + p[1], 0) / poly.length;
-  const kx = 111.32 * Math.cos((lat0 * Math.PI) / 180), ky = 110.57;
-  let a = 0;
-  for (let i = 0; i < poly.length - 1; i++) a += poly[i][0] * kx * poly[i + 1][1] * ky - poly[i + 1][0] * kx * poly[i][1] * ky;
-  return Math.abs(a / 2);
-}
 
 let firstFit = true;
 async function updateAoi(fit) {
@@ -374,12 +412,14 @@ async function updateAoi(fit) {
     info.className = 'aoi-info err';
     info.textContent = aoi.error;
     state.aoi = null;
+    markOutdated('area');
     map.getSource('aoi').setData({ type: 'FeatureCollection', features: [] });
     map.getSource('mask').setData({ type: 'FeatureCollection', features: [] });
     return;
   }
   state.aoi = aoi;
-  const area = approxAreaKm2(aoi.polygon);
+  if (state.results && JSON.stringify(aoi.polygon) !== JSON.stringify(state.results.aoi.polygon)) markOutdated('area');
+  const area = ringAreaKm2(aoi.polygon);
   info.className = 'aoi-info' + (area > 20000 ? ' warn' : '');
   info.textContent = `Area: ${area.toLocaleString(undefined, { maximumFractionDigits: 1 })} km² (${aoi.kind})` +
     (area > 20000 ? ' — large area: detail will be coarse; consider a smaller area.' : '');
@@ -406,6 +446,9 @@ async function updateAoi(fit) {
 $('#add-row').addEventListener('click', () => addRow());
 $('#clear-rows').addEventListener('click', () => { $('#coord-body').innerHTML = ''; addRow(); updateAoi(false); });
 $('#radius').addEventListener('change', () => updateAoi(false));
+// changing the period, phenomena or sampling makes displayed results outdated
+for (const id of ['#start', '#end', '#event-date', '#samples', '#detail']) $(id).addEventListener('change', () => markOutdated(id === '#samples' || id === '#detail' ? 'settings' : 'period'));
+$('#phenomena').addEventListener('change', () => markOutdated('phenomena'));
 
 // ============================================================ phenomena + examples
 function renderPhenomenaPicker(selected) {
@@ -449,6 +492,32 @@ function setProgress(f) { $('#progress-bar').style.width = `${Math.round(f * 100
 
 $('#analyze').addEventListener('click', analyze);
 
+/** Results no longer match the inputs: say so everywhere and stop showing stale layers. */
+function markOutdated(reason) {
+  if (!state.results || state.outdated) return;
+  state.outdated = reason;
+  stopPlay();
+  const what = { area: 'the area of interest', period: 'the time period', phenomena: 'the selected phenomena', settings: 'the sampling settings' }[reason] || 'the inputs';
+  document.body.classList.add('results-outdated');
+  markBanners();
+  renderLegend();
+  $('#export-csv').disabled = $('#export-json').disabled = true;
+  setStatus(`Results outdated: ${what} changed. Run the analysis again.`, true);
+  renderMapLayers();
+}
+function markBanners() {
+  const what = { area: 'the area of interest', period: 'the time period', phenomena: 'the selected phenomena', settings: 'the sampling settings' }[state.outdated] || 'the inputs';
+  for (const el of document.querySelectorAll('.outdated-banner')) {
+    el.hidden = false;
+    el.innerHTML = `<b>Results outdated</b> – ${what} changed after this analysis. Press <b>Analyse with NASA data</b> to update.`;
+  }
+}
+function clearOutdated() {
+  state.outdated = false;
+  document.body.classList.remove('results-outdated');
+  for (const el of document.querySelectorAll('.outdated-banner')) el.hidden = true;
+}
+
 async function analyze() {
   await updateAoi(false);
   if (!state.aoi) { setStatus('Fix the area of interest first.', true); return; }
@@ -472,13 +541,19 @@ async function analyze() {
   $('#show-baseline').checked = false;
   $('#analyze').disabled = true;
   setProgress(0.02);
-  setStatus('Building analysis grid…');
-  const grid = makeGrid(state.aoi.polygon, state.aoi.bbox, detail);
+  setStatus('Building analysis grids…');
+  const grid = makeGrid(state.aoi.polygon, state.aoi.bbox, detail);     // degree grid for imagery-based indicators
+  const mgrid = makeMetricGrid(state.aoi.polygon);                        // 30 m UTM grid for product rasters
   const datasets = DATASETS.filter(d => phen.includes(d.phenomenon));
-  const results = { grid, start, end: endUse, eventDate, phen, aoi: state.aoi, byId: new Map(), started: new Date().toISOString() };
+  const results = {
+    id: Date.now(), grid, mgrid, start, end: endUse, eventDate, phen, aoi: state.aoi, byId: new Map(),
+    settings: vegSettings(), started: new Date().toISOString()
+  };
   state.results = results;
-  state.shown = new Set(phen.map(p => DATASETS.find(d => d.phenomenon === p).id));
-  datasets.forEach(ds => results.byId.set(ds.id, { ds, status: 'queued', frames: [], errors: [] }));
+  state.dates = [];
+  clearOutdated();
+  state.shown = new Set(phen.map(p => (DATASETS.find(d => d.phenomenon === p && d.gibs) || {}).id).filter(Boolean));
+  datasets.forEach(ds => results.byId.set(ds.id, { ds, status: 'queued', frames: [], errors: [], diagnostics: [] }));
   showTab('sources');
   renderSources();
 
@@ -487,34 +562,36 @@ async function analyze() {
   const tick = () => { done++; setProgress(Math.min(0.98, done / total)); };
   const dsLimit = limiter(3), imgLimit = limiter(4);
 
-  setStatus(`Searching NASA's catalogue for ${datasets.length} datasets…`);
-  await Promise.all(datasets.map(ds => dsLimit(() => runDataset(ds, results, n, imgLimit, tick))));
+  setStatus(`Searching NASA's catalogue for ${datasets.length} datasets…` +
+    (mgrid.native ? '' : `\nLarge area: product rasters are sampled every ${mgrid.cell} m (nearest neighbour).`));
+  await Promise.all(datasets.map(ds => dsLimit(() => (ds.raster ? runRasterDataset : runImageryDataset)(ds, results, n, imgLimit, tick))));
+  if (state.results !== results) return;                                 // a newer analysis started
 
   const live = [...results.byId.values()].filter(r => r.status === 'live');
-  state.dates = [...new Set(live.flatMap(r => r.frames.filter(f => f.stats).map(f => f.date)))].sort();
+  state.dates = [...new Set(live.flatMap(r => r.frames.filter(f => f.stats || f.rain).map(f => f.date)))].sort();
   state.dateIdx = Math.max(0, state.dates.length - 1);
   setProgress(1);
   $('#analyze').disabled = false;
   $('#live-pill').className = 'live-pill ' + (live.length ? 'on' : 'err');
-
-  if (!state.dates.length) {
-    setStatus('No NASA imagery could be read for this area and period. Check the Data sources tab for details, or try a wider period.', true);
-    renderSources();
-    return;
-  }
-  const failed = results.byId.size - live.length;
-  setStatus(`Done: ${live.length} of ${results.byId.size} datasets returned real NASA data` +
-    (failed ? ` (${failed} without usable imagery – see Data sources).` : '.') +
-    `\nAnalysed ${state.dates.length} dates between ${state.dates[0]} and ${state.dates.at(-1)}.`);
-  $('#export-csv').disabled = $('#export-json').disabled = false;
   results.events = buildEvents(results);
   state.activeEvent = (results.events.find(e => e.firstAffected) || {}).id || null;
+
+  const states = phen.map(pid => `${PHENOMENA[pid].short}: ${STATE_TEXT[phenomenonState(pid)]}`);
+  if (!state.dates.length) {
+    setStatus(`No usable NASA observations.\n${states.join('\n')}\nSee Data sources for each dataset's diagnostics.`, true);
+    renderSources(); renderFindings(); buildTimeline();
+    showTab('findings');
+    return;
+  }
+  setStatus(`Analysis complete – ${live.length} of ${results.byId.size} datasets returned usable NASA data.\n` +
+    `${states.join(' · ')}\nObservations from ${state.dates[0]} to ${state.dates.at(-1)}.`);
+  $('#export-csv').disabled = $('#export-json').disabled = false;
   buildTimeline();
   showTab('findings');
   selectDate(state.dateIdx);
 }
 
-/** Sample dates; with a flood event date, keep observations on both sides of it. */
+/** Sample dates; with a flood event date, keep several observations on both sides of it. */
 function pickDates(dates, n, eventDate) {
   if (!eventDate) return sampleDates(dates, n);
   const before = dates.filter(d => d < eventDate), after = dates.filter(d => d >= eventDate);
@@ -523,116 +600,219 @@ function pickDates(dates, n, eventDate) {
   return [...sampleDates(before, nb), ...sampleDates(after, Math.max(2, n - nb))];
 }
 
-async function runDataset(ds, results, n, imgLimit, tick) {
+/** Keep catalogue dates inside the period (CMR filters too; this is a second guard). */
+function datesInPeriod(r, dates, start, end) {
+  const outside = dates.filter(d => d < start || d > end).length;
+  if (outside) r.errors.push(`${outside} catalogue date(s) outside the selected period were ignored.`);
+  return dates.filter(d => d >= start && d <= end);
+}
+
+function failDataset(r, kind, message) {
+  r.status = kind === 'insufficient' ? 'no-data' : 'failed';
+  r.errorKind = kind;
+  r.errors.push(message);
+  renderSources();
+}
+
+// ---- product rasters (OPERA DIST-ALERT, DSWx, MODIS flood): numbers from the GeoTIFF bands
+async function runRasterDataset(ds, results, n, imgLimit, tick) {
+  const r = results.byId.get(ds.id);
+  const { mgrid, start, end } = results;
+  const bands = ds.raster.bands;
+  try {
+    r.status = 'searching'; renderSources();
+    let cmr;
+    try { cmr = await fetchGranules(ds.cmr, mgrid.bbox, start, end, bands); }
+    catch (e) { tick(); return failDataset(r, 'retrieval', e.message); }
+    tick();
+    r.cmr = cmr;
+    r.version = (cmr.collectionInfo || []).map(c => c.version).filter(Boolean).join(', ') || null;
+    if (cmr.truncated) r.errors.push(`NASA's catalogue lists ${cmr.hits} granules; only the first ${cmr.returned} were retrieved. Shorten the period for a complete analysis.`);
+    const granules = (cmr.granules || []).filter(g => g.date >= start && g.date <= end);
+    if (!granules.length) return failDataset(r, 'insufficient', 'NASA has no acquisitions of this product over your area in this period.');
+    const usable = granules.filter(g => g.links && g.links[0]);
+    if (!usable.length) return failDataset(r, 'retrieval', `NASA lists ${granules.length} granules, but none links a ${bands[0]} band file.`);
+    const byDate = new Map();
+    for (const g of usable) { if (!byDate.has(g.date)) byDate.set(g.date, []); byDate.get(g.date).push(g); }
+    const dates = datesInPeriod(r, [...byDate.keys()].sort(), start, end);
+    r.acqDates = dates;
+    const picked = ds.phenomenon === 'water' ? pickDates(dates, n, results.eventDate) : sampleDates(dates, n);
+    tick();
+
+    r.status = 'loading'; renderSources();
+    const frames = await Promise.all(picked.map(date => imgLimit(async () => {
+      try { return await rasterFrame(ds, r, results, date, byDate.get(date)); }
+      finally { tick(); }
+    })));
+    if (state.results !== results) return;
+    frames.sort((a, b) => a.date.localeCompare(b.date));
+    if (ds.method === 'water') processWater(r, frames, mgrid, results.eventDate);
+    else for (const f of frames) if (f.raw) applyDist(f, mgrid, results.settings);
+    r.frames = frames;
+    finishDataset(r);
+  } catch (e) {
+    failDataset(r, 'processing', `Processing error: ${e.message}`);
+  }
+  renderSources();
+}
+
+/** One observation date: mosaic every granule of that date onto the grid, then decode. */
+async function rasterFrame(ds, r, results, date, granules) {
+  const grid = results.mgrid, bands = ds.raster.bands;
+  const target = newTarget(grid, bands.length);
+  const gdiag = [];
+  let anomAvailable = bands.length > 1;
+  for (const g of granules) {
+    const d = { granule: g.title, id: g.id, files: g.links.filter(Boolean).map(u => u.split('/').pop()), status: 'pending' };
+    gdiag.push(d);
+    try {
+      const tiffs = await Promise.all(g.links.map(u => (u ? openRemoteTiff(u) : null)));
+      const layers = await Promise.all(tiffs.map(t => (t ? withTimeout(readWindow(t, grid), 120000, 'Reading the raster window') : { data: null })));
+      d.productVersion = layers[0].productVersion || null;
+      d.epsg = layers[0].epsg;
+      d.pixelSize = layers[0].resX;
+      if (ds.raster.expectVersion && d.productVersion && !String(d.productVersion).replace(/^v/i, '').startsWith(ds.raster.expectVersion)) {
+        d.warning = `file reports product version ${d.productVersion}; class table verified for version ${ds.raster.expectVersion}`;
+      }
+      if (!layers[0].data) { d.status = 'no-overlap'; d.aoiIntersectionPct = 0; continue; }
+      if (bands.length > 1 && !layers[1].data) anomAvailable = anomAvailable && false;
+      const isValid = ds.method === 'water'
+        ? v => { const name = WATER_CODES[ds.waterCodes][v[0]]; return !!name && name !== 'invalid'; }
+        : v => v[0] !== 255 && v[0] <= 8;
+      const res = sampleGranule(grid, layers, target, isValid);
+      d.status = 'ok';
+      d.aoiIntersectionPct = grid.aoiPixels ? (100 * res.inside) / grid.aoiPixels : 0;
+      d.cellsUsed = res.filled;
+    } catch (e) {
+      d.status = e.kind || 'processing';
+      d.message = e.message;
+    }
+  }
+  const okG = gdiag.filter(d => d.status === 'ok');
+  const frame = { date, granules: gdiag };
+  const diag = { date, product: ds.cmr, version: r.version, granules: gdiag };
+  r.diagnostics.push(diag);
+  if (!okG.length) {
+    const errs = gdiag.filter(d => d.status !== 'no-overlap');
+    frame.error = errs.length ? `${errs[0].status}: ${errs[0].message || 'no data'}` : 'no granule of this date covers the area';
+    frame.errorKind = errs.length ? (errs[0].status === 'processing' || errs[0].status === 'malformed' ? 'processing' : 'retrieval') : 'insufficient';
+    diag.status = frame.errorKind; diag.message = frame.error;
+    console.info(`[EarthScope] ${ds.id} ${date}: ${frame.error}`);
+    return frame;
+  }
+  frame.hist = valueHistogram(grid, target.bands[0], target.covered);
+  frame.coveredCells = target.covered.reduce((a, v, p) => a + (v && grid.mask[p] ? 1 : 0), 0);
+  if (ds.method === 'water') {
+    const dec = decodeWater(grid, target.bands[0], target.covered, WATER_CODES[ds.waterCodes]);
+    frame.cls = dec.cls; frame.counts = dec.counts;
+    Object.assign(diag, { status: 'ok', validPx: dec.counts.validPx, invalidPx: dec.counts.invalidPx, missingPx: dec.counts.missingPx, unrecognisedPx: dec.counts.unrecognisedPx, detectedPx: dec.counts.waterPx, hist: frame.hist });
+  } else {
+    frame.raw = { status: target.bands[0], anom: anomAvailable ? target.bands[1] : null, covered: target.covered };
+    diag.status = 'ok'; diag.hist = frame.hist;
+    if (!anomAvailable && bands.length > 1) diag.warning = 'loss-magnitude band (VEG-ANOM-MAX) missing – the minimum-loss setting cannot be applied';
+  }
+  console.info(`[EarthScope] ${ds.id} ${date}: ${okG.length}/${gdiag.length} granule(s) read`, diag);
+  return frame;
+}
+
+/** Decode a DIST observation with the current sensitivity settings (re-run when they change). */
+function applyDist(f, grid, settings) {
+  const out = decodeDist(grid, f.raw.status, f.raw.anom, f.raw.covered, settings);
+  f.levels = out.levels;
+  f.stats = out.stats;
+  f.coverage = out.stats.coveragePct / 100;
+  f.error = out.stats.validPx ? undefined : 'no valid observation over the area (all no data / masked)';
+  if (!out.stats.validPx) { f.errorKind = 'insufficient'; f.stats = undefined; }
+  return out;
+}
+
+/** Final status of a dataset from its frames (never "live" without a valid observation). */
+function finishDataset(r) {
+  const ok = r.frames.filter(f => f.stats || f.rain);
+  for (const f of r.frames) {
+    const d = r.diagnostics.find(x => x.date === f.date);
+    if (d && f.stats) Object.assign(d, {
+      validPx: f.stats.validPx ?? d.validPx, invalidPx: f.stats.invalidPx ?? d.invalidPx, missingPx: f.stats.missingPx ?? d.missingPx,
+      detectedPx: f.stats.detectedPx ?? d.detectedPx,
+      areaKm2: r.ds.method === 'water' ? f.stats.newKm2 : f.stats.detectedKm2, coveragePct: f.stats.coveragePct
+    });
+  }
+  if (ok.length) { r.status = 'live'; r.errorKind = null; return; }
+  const kinds = r.frames.map(f => f.errorKind).filter(Boolean);
+  const kind = kinds.includes('processing') ? 'processing' : kinds.includes('retrieval') && !kinds.includes('insufficient') ? 'retrieval'
+    : kinds.includes('retrieval') ? 'retrieval' : 'insufficient';
+  const first = r.frames.find(f => f.error);
+  failDataset(r, kind, `No usable observation (${first ? first.error : 'no data'}).`);
+}
+
+// ---- imagery-based indicators (fire, chlorophyll, rainfall, radar brightness): GIBS imagery
+async function runImageryDataset(ds, results, n, imgLimit, tick) {
   const r = results.byId.get(ds.id);
   const { grid, start, end } = results;
   try {
-    // 1. Real acquisitions from NASA CMR
     r.status = 'searching'; renderSources();
     try {
       r.cmr = await fetchCmr(ds.cmr, grid.bbox, start, end);
     } catch (e) {
-      r.errors.push(`NASA catalogue (CMR) search failed: ${e.message}`);
+      if (ds.dates === 'granules') { tick(); return failDataset(r, 'retrieval', `NASA catalogue (CMR) search failed: ${e.message}`); }
+      r.errors.push(`NASA catalogue (CMR) search failed: ${e.message} – daily product sampled without the acquisition list.`);
     }
     tick();
     let dates;
     if (ds.dates === 'granules') {
-      dates = r.cmr ? r.cmr.dates : dailyDates(start, end, n);
-      if (r.cmr && !dates.length) {
-        r.status = 'no-data';
-        r.errors.push('NASA has no acquisitions of this product over your area in this period.');
-        renderSources();
-        return;
-      }
+      dates = r.cmr.dates;
+      if (!dates.length) return failDataset(r, 'insufficient', 'NASA has no acquisitions of this product over your area in this period.');
     } else {
-      dates = dailyDates(start, end, ds.method === 'water' ? Math.max(n, 12) : ds.phenomenon === 'fire' ? Math.max(n, 16) : n);
+      dates = dailyDates(start, end, ds.phenomenon === 'fire' ? Math.max(n, 16) : n);
     }
-    // date filtering: never use an observation outside the selected period
-    const outside = dates.filter(d => d < start || d > end).length;
-    if (outside) {
-      dates = dates.filter(d => d >= start && d <= end);
-      r.errors.push(`${outside} catalogue date(s) outside the selected period were ignored.`);
-      if (!dates.length) { r.status = 'no-data'; r.errors.push('No acquisitions inside the selected period.'); renderSources(); return; }
-    }
+    dates = datesInPeriod(r, dates, start, end);
+    if (!dates.length) return failDataset(r, 'insufficient', 'No acquisitions inside the selected period.');
     r.acqDates = dates;
-    const picked = ds.phenomenon === 'water' ? pickDates(dates, n, results.eventDate) : sampleDates(dates, n);
+    const picked = sampleDates(dates, n);
 
-    // 2. NASA colour map → classifier
     if (ds.method !== 'presence' && ds.method !== 'sar') {
       const xml = await fetchColormapXml(ds.gibs).catch(() => null);
       r.colormap = parseColormap(xml);
     }
-    if (ds.method === 'water') {
-      r.classifier = buildWaterClassifier(r.colormap, WATER_CODES[ds.waterCodes], WATER_LABEL_RULES);
-      if (!r.classifier.valid) {
-        // Without NASA's class table the colours cannot be interpreted – never guess.
-        r.status = 'failed';
-        r.errors.push('NASA colour map (class table) not available, so the water classes cannot be read. Dataset not used.');
-        tick(); renderSources();
-        return;
-      }
-    } else if (ds.method === 'rain') {
+    if (ds.method === 'rain') {
       r.classifier = buildValueClassifier(r.colormap);
-      if (!r.classifier.palette.length) {
-        r.status = 'failed';
-        r.errors.push('NASA colour map not available, so rainfall values cannot be read. Context not shown.');
-        tick(); renderSources();
-        return;
-      }
+      if (!r.classifier.palette.length) { tick(); return failDataset(r, 'retrieval', 'NASA colour map not available, so rainfall values cannot be read. Context not shown.'); }
     } else {
-      if ((ds.method === 'classes' || ds.method === 'continuous') && !r.colormap) {
-        r.errors.push('NASA colour map not available – any coloured pixel counts as "detected" (intensity unknown).');
-      }
+      if (ds.method === 'continuous' && !r.colormap) r.errors.push('NASA colour map not available – any coloured pixel counts as "detected" (intensity unknown).');
       r.classifier = buildClassifier(ds, r.colormap);
     }
     r.units = r.colormap ? r.colormap.units : '';
     tick();
 
-    // 3. Images for each date
     r.status = 'loading'; renderSources();
-    const acquired = new Set(r.cmr ? r.cmr.dates : []);
     const frames = await Promise.all(picked.map(date => imgLimit(async () => {
       try {
         const rgba = await fetchPixels(ds.gibs, date, grid);
         const coverage = imageCoverage(rgba, grid);
         if (ds.method === 'sar') return { date, coverage, lum: luminance(rgba, grid) };
-        if (ds.method === 'water') return { date, cls: classifyWater(rgba, grid, r.classifier, !r.cmr || acquired.has(date)) };
         if (ds.method === 'rain') return { date, coverage, rain: valueStats(rgba, grid, r.classifier) };
         return { date, coverage, levels: classifyPixels(rgba, grid, ds, r.classifier) };
       } catch (e) {
-        return { date, error: e.message };
+        return { date, error: e.message, errorKind: 'retrieval' };
       } finally { tick(); }
     })));
+    if (state.results !== results) return;
     frames.sort((a, b) => a.date.localeCompare(b.date));
-
-    // 4. Post-processing
-    if (ds.method === 'water') {
-      processWater(r, frames, grid, results.eventDate);
-    } else if (ds.method === 'sar') {
+    if (ds.method === 'sar') {
       const usable = frames.filter(f => !f.error && f.coverage >= 0.05);
       if (usable.length) {
         const ref = usable[0];
         r.reference = ref.date;
-        for (const f of usable) {
-          f.levels = sarLevels(ref.lum, f.lum, ds.sarThresholds);
-          let s = 0, c = 0;
-          for (const v of f.lum) if (v >= 0) { s += v; c++; }
-          f.meanLum = c ? s / c : null;
-        }
+        for (const f of usable) f.levels = sarLevels(ref.lum, f.lum, ds.sarThresholds);
       }
-      frames.filter(f => !f.error && f.coverage < 0.05).forEach(f => { f.error = 'radar image does not cover the area'; });
+      frames.filter(f => !f.error && f.coverage < 0.05).forEach(f => { f.error = 'radar image does not cover the area'; f.errorKind = 'insufficient'; });
     }
-    if (ds.method !== 'water' && ds.method !== 'rain') for (const f of frames) if (f.levels) f.stats = frameStats(f.levels, grid);
+    if (ds.method !== 'rain') for (const f of frames) if (f.levels) f.stats = frameStats(f.levels, grid);
+    for (const f of frames) r.diagnostics.push({ date: f.date, product: ds.gibs, source: 'GIBS imagery', status: f.error ? f.errorKind : 'ok', message: f.error, coveragePct: f.coverage != null ? f.coverage * 100 : null, areaKm2: f.stats ? f.stats.affected : null });
     r.frames = frames;
-    const ok = frames.filter(f => f.stats || f.rain);
-    r.status = ok.length ? 'live' : 'failed';
-    if (!ok.length) {
-      const first = frames.find(f => f.error);
-      r.errors.push(`No usable NASA images (${first ? first.error : 'empty images'}).`);
-    }
+    finishDataset(r);
   } catch (e) {
-    r.status = 'failed';
-    r.errors.push(e.message);
+    failDataset(r, 'processing', `Processing error: ${e.message}`);
   }
   renderSources();
 }
@@ -640,8 +820,10 @@ async function runDataset(ds, results, n, imgLimit, tick) {
 /**
  * Water: split observations into a pre-event baseline and later observations, then
  * label every valid water pixel as normal water / newly inundated / baseline unknown.
- * Baseline = observations before the event date; without an event date, the
- * observations up to and including the first one that sees ≥ 30 % of the area.
+ * Baseline = all valid observations strictly before the event date (multi-observation,
+ * majority vote per pixel). Without an event date the baseline is ASSUMED to be the
+ * earliest observations up to the first one that sees ≥ 30 % of the area – this is
+ * flagged, because if the flood had already begun new water would be underestimated.
  */
 function processWater(r, frames, grid, eventDate) {
   const n = grid.w * grid.h;
@@ -649,15 +831,11 @@ function processWater(r, frames, grid, eventDate) {
     if (f.error) continue;
     const pre = waterStats(f.cls, new Uint8Array(n).fill(OUT), grid);
     f.coverage = pre.coveragePct / 100;
-    if (pre.validKm2 <= 0) f.error = 'no valid water observation over the area (no data, cloud or masked)';
+    if (pre.validKm2 <= 0) { f.error = 'no valid water observation over the area (no data, cloud, snow or masked)'; f.errorKind = 'insufficient'; }
   }
   const ok = frames.filter(f => !f.error);
-  let baseFrames;
-  if (eventDate) baseFrames = ok.filter(f => f.date < eventDate);
-  else {
-    const k = ok.findIndex(f => f.coverage >= 0.3);
-    baseFrames = k >= 0 ? ok.slice(0, k + 1) : [];
-  }
+  const baseFrames = baselineFrames(ok, eventDate);
+  r.baselineAssumed = !eventDate && baseFrames.length > 0;
   const baseline = baseFrames.length ? waterBaseline(baseFrames.map(f => f.cls), n) : null;
   r.baseline = baseline;
   r.baselineDates = baseFrames.map(f => f.date);
@@ -665,6 +843,7 @@ function processWater(r, frames, grid, eventDate) {
     let known = 0;
     for (let p = 0; p < n; p++) if (grid.mask[p] && baseline[p] !== OUT) known += grid.rowArea[Math.floor(p / grid.w)];
     r.baselineCoverPct = grid.aoiKm2 ? (100 * known) / grid.aoiKm2 : 0;
+    if (r.baselineAssumed) r.errors.push('No flood event date set: the baseline is assumed to be the earliest observation(s). If the flood had already begun, newly inundated area is underestimated.');
   } else {
     r.baselineCoverPct = 0;
     r.errors.push(eventDate
@@ -676,13 +855,67 @@ function processWater(r, frames, grid, eventDate) {
     f.role = baseSet.has(f.date) ? 'baseline' : 'post';
     f.status = waterStatus(f.cls, baseline);
     f.stats = waterStats(f.cls, f.status, grid);
+    f.stats.validPx = f.counts.validPx; f.stats.invalidPx = f.counts.invalidPx; f.stats.missingPx = f.counts.missingPx;
+    f.stats.detectedPx = Math.round(f.stats.newKm2 / grid.rowArea[0]);
   }
-  r.mismatches = (r.classifier.info || []).filter(i => i.mismatch);
 }
+
+// ---- vegetation sensitivity (analysis settings; changing them re-decodes, no re-download)
+function vegSettings() {
+  return { minLossPct: +$('#veg-loss').value, minPatchHa: +$('#veg-patch').value };
+}
+function onVegSettings() {
+  const res = state.results;
+  if (!res || state.outdated) return;
+  res.settings = vegSettings();
+  for (const r of res.byId.values()) {
+    if (r.ds.method !== 'dist' || !r.frames.length) continue;
+    for (const f of r.frames) if (f.raw) applyDist(f, res.mgrid, res.settings);
+    const wasLive = r.status === 'live';
+    r.status = 'loading'; r.errors = r.errors.filter(e => !/^No usable observation/.test(e));
+    finishDataset(r);
+    if (!wasLive && r.status === 'live') r.errorKind = null;
+  }
+  res.events = buildEvents(res);
+  const live = liveResults();
+  state.dates = [...new Set(live.flatMap(r => r.frames.filter(f => f.stats || f.rain).map(f => f.date)))].sort();
+  state.dateIdx = Math.min(state.dateIdx, Math.max(0, state.dates.length - 1));
+  buildTimeline();
+  if (state.dates.length) selectDate(state.dateIdx); else { renderFindings(); renderSources(); renderMapLayers(); }
+  toast(`Vegetation settings applied: minimum loss ${res.settings.minLossPct} %, minimum patch ${res.settings.minPatchHa ? res.settings.minPatchHa + ' ha' : 'none'}.`);
+}
+$('#veg-loss').addEventListener('change', onVegSettings);
+$('#veg-patch').addEventListener('change', onVegSettings);
 
 // ============================================================ summaries
 const isWater = r => r.ds.method === 'water';
 const isRain = r => r.ds.method === 'rain';
+const isDist = r => r.ds.method === 'dist';
+const isIndicator = r => !!r.ds.indicator;
+
+
+// ---- analysis states (one per phenomenon)
+const STATE_TEXT = {
+  change: 'change detected', 'no-change': 'no change detected', insufficient: 'insufficient data',
+  'data-error': 'data retrieval error', 'processing-error': 'processing error', outdated: 'results outdated'
+};
+/** State of a phenomenon: never "no change" unless valid observations exist. */
+function phenomenonState(pid) {
+  if (state.outdated) return 'outdated';
+  const rs = [...state.results.byId.values()].filter(r => r.ds.phenomenon === pid && !r.ds.context && !r.ds.indicator);
+  const live = rs.filter(r => r.status === 'live');
+  if (live.length) {
+    const changed = live.some(r => r.frames.some(f => f.stats && (isWater(r) ? f.role === 'post' && floodSignal(f.stats) : (f.stats.detectedKm2 ?? f.stats.affected) > 0)));
+    const anyBaseline = !live.some(isWater) || live.some(r => isWater(r) && r.baseline);
+    if (changed) return 'change';
+    return anyBaseline ? 'no-change' : 'insufficient';
+  }
+  // nothing usable: a failed retrieval or processing step is an ERROR (it says nothing about
+  // the surface); only when every dataset simply had no valid observation is it "insufficient"
+  if (rs.some(r => r.errorKind === 'processing')) return 'processing-error';
+  if (rs.some(r => r.errorKind === 'retrieval')) return 'data-error';
+  return 'insufficient';
+}
 
 function frameAt(r, date) {
   const ok = r.frames.filter(f => f.stats);
@@ -694,10 +927,10 @@ function frameAt(r, date) {
 const firstFrame = r => r.frames.find(f => f.stats) || null;
 const liveResults = () => (state.results ? [...state.results.byId.values()].filter(r => r.status === 'live') : []);
 
-/** Intensity-scale phenomena (vegetation, fire, chlorophyll). */
+/** Intensity-scale phenomena estimated from imagery (fire, chlorophyll). */
 function summarize(pid, date) {
   const grid = state.results.grid;
-  const rs = liveResults().filter(r => r.ds.phenomenon === pid && !isWater(r) && !isRain(r));
+  const rs = liveResults().filter(r => r.ds.phenomenon === pid && !isWater(r) && !isRain(r) && !isDist(r) && !isIndicator(r));
   if (!rs.length) return null;
   const frames = rs.map(r => frameAt(r, date));
   const { merged, agreeKm2 } = combine(frames.map(f => f.levels), grid);
@@ -707,8 +940,35 @@ function summarize(pid, date) {
     pid, rs, frames, merged, agreeKm2, stats,
     firstDate: rs.map(r => firstFrame(r).date).sort()[0],
     trend: stats.affected - firstStats.affected,
-    level: overallLevel(stats, grid.aoiKm2)
+    level: overallLevel(stats)
   };
+}
+
+/**
+ * Vegetation disturbance from OPERA DIST rasters. DIST-ALERT-HLS (vegetation) is the
+ * headline; DIST-ALERT-S1 (generic radar disturbance) is reported separately and only
+ * compared with it. Radar brightness indicators (RTC, NISAR) are listed but never added.
+ */
+function summarizeVeg(date) {
+  const res = state.results;
+  const rows = liveResults().filter(isDist).map(r => ({ r, f: frameAt(r, date) })).filter(x => x.f);
+  const indicators = liveResults().filter(r => r.ds.phenomenon === 'vegetation' && isIndicator(r)).map(r => ({ r, f: frameAt(r, date) })).filter(x => x.f);
+  const headline = rows.find(x => x.r.ds.id === 'dist') || rows[0] || null;
+  let agreement = null;
+  const other = headline && rows.find(x => x !== headline);
+  if (headline && other && Math.abs(Date.parse(other.f.date) - Date.parse(headline.f.date)) <= 16 * 86400000) {
+    const a = headline.f.levels, b = other.f.levels, g = res.mgrid;
+    let common = 0, both = 0, either = 0;
+    for (let p = 0; p < a.length; p++) {
+      if (!g.mask[p] || a[p] === OUT || b[p] === OUT) continue;
+      common++;
+      const da = a[p] >= 1, db = b[p] >= 1;
+      if (da && db) both++;
+      if (da || db) either++;
+    }
+    agreement = { with: other.r.ds.name, commonKm2: common * g.rowArea[0], bothKm2: both * g.rowArea[0], overlapPct: either ? (100 * both) / either : null };
+  }
+  return { rows, indicators, headline, agreement };
 }
 
 /**
@@ -718,7 +978,7 @@ function summarize(pid, date) {
  * to measure agreement, which feeds the confidence rating.
  */
 function summarizeWater(date) {
-  const grid = state.results.grid;
+  const grid = state.results.mgrid;
   const rs = liveResults().filter(isWater);
   const rain = liveResults().find(isRain) || null;
   const rows = rs.map(r => ({ r, f: frameAt(r, date) })).filter(x => x.f);
@@ -731,7 +991,7 @@ function summarizeWater(date) {
     if (!x.r.baseline || !headline.r.baseline) continue;               // "new" is undefined without a baseline
     // water changes within days: only compare observations made within 3 days of each other
     if (Math.abs(Date.parse(x.f.date) - Date.parse(headline.f.date)) > 3 * 86400000) { x.tooFar = true; continue; }
-    const a = waterAgreement(headline.f.status, x.f.status, grid);
+    const a = waterAgreement(headline.f.status, x.f.status, grid, headline.f.cls, x.f.cls);
     x.agreement = a;
     if (!agreement || a.commonKm2 > agreement.commonKm2) { agreement = a; agreeWith = x; }
   }
@@ -739,7 +999,11 @@ function summarizeWater(date) {
   const confidence = headline.r.baseline
     ? waterConfidence(st, agreement)
     : { level: 'Insufficient data', reasons: ['no pre-event baseline, so new water cannot be separated from normal water'] };
-  const sig = st.newKm2 >= Math.max(0.05, 0.005 * st.validKm2);
+  if (headline.r.baselineAssumed && confidence.level === 'High') {
+    confidence.level = 'Medium';
+    confidence.reasons.push('no event date: baseline assumed to be pre-event – capped at Medium');
+  }
+  const sig = floodSignal(st);
   let verdict;
   if (headline.f.role === 'baseline') verdict = 'Pre-event baseline';
   else if (confidence.level === 'Insufficient data') verdict = 'Insufficient data';
@@ -764,25 +1028,28 @@ function summarizeWater(date) {
  * Reported dates (agency records, the user's flood event date) are attached separately.
  */
 const EVENT_KIND = { water: 'flood', fire: 'fire', vegetation: 'change', algae: 'change' };
-const EVENT_TITLE = { water: 'Flood', fire: 'Wildfire', vegetation: 'Vegetation loss', algae: 'Algae bloom' };
+const EVENT_TITLE = { water: 'Flood', fire: 'Wildfire', vegetation: 'Vegetation disturbance', algae: 'Algae bloom' };
 
 function observationsFor(pid, res) {
   const obs = [];
   for (const r of res.byId.values()) {
-    if (r.status !== 'live' || r.ds.phenomenon !== pid || isRain(r)) continue;
+    if (r.status !== 'live' || r.ds.phenomenon !== pid || isRain(r) || isIndicator(r)) continue;
     for (const f of r.frames) {
       if (!f.stats) continue;
       let state, value;
       if (isWater(r)) {
         const st = f.stats;
-        const thr = Math.max(0.05, 0.005 * st.validKm2);
         if (st.coveragePct < 25) state = 'unknown';
         else if (f.role === 'baseline') state = 'clear';
         else if (!r.baseline) state = 'unknown';
-        else state = st.newKm2 >= thr ? 'affected' : 'clear';
+        else state = floodSignal(st) ? 'affected' : 'clear';
         value = f.role === 'post' ? st.newKm2 : 0;
+      } else if (isDist(r)) {
+        // any detected disturbance pixel counts – no minimum area; low coverage = unknown
+        state = f.stats.coveragePct < 25 ? 'unknown' : f.stats.detectedKm2 > 0 ? 'affected' : 'clear';
+        value = f.stats.detectedKm2;
       } else {
-        const lv = overallLevel(f.stats, res.grid.aoiKm2);
+        const lv = overallLevel(f.stats);
         state = r.ds.method === 'presence' ? (f.stats.affected > 0 ? 'affected' : 'clear') : (lv > 0 ? 'affected' : 'clear');
         value = f.stats.affected;
       }
@@ -812,7 +1079,7 @@ function buildEvents(res) {
     if (pid === 'water' && res.eventDate) {
       ev.reported.push({ phenomenon: 'water', type: 'user', date: res.eventDate, label: 'Flood event date entered by the user', source: 'User input (used to split baseline / post-event observations)' });
     }
-    ev.valueLabel = kind === 'flood' ? 'newly inundated area' : kind === 'fire' ? 'active-fire pixel area' : 'affected area';
+    ev.valueLabel = kind === 'flood' ? 'newly inundated area' : kind === 'fire' ? 'active-fire pixel area' : pid === 'vegetation' ? 'disturbed area' : 'affected area';
     return ev;
   });
 }
@@ -870,11 +1137,21 @@ $('#event-select').addEventListener('change', e => selectEvent(e.target.value));
 document.querySelectorAll('#phase-nav [data-phase]').forEach(b => b.addEventListener('click', () => goPhase(b.dataset.phase)));
 
 // ============================================================ timeline
+// The slider and chart use real time (days since the start of the period), so unevenly
+// spaced acquisitions are shown at their true dates; the slider snaps to the nearest
+// analysed observation.
+const dayOf = d => daysBetween(state.results.start, d);
+function nearestDateIdx(day) {
+  let best = 0, bd = Infinity;
+  state.dates.forEach((d, i) => { const dd = Math.abs(dayOf(d) - day); if (dd < bd) { bd = dd; best = i; } });
+  return best;
+}
 function buildTimeline() {
   const slider = $('#slider');
   slider.min = 0;
-  slider.max = Math.max(0, state.dates.length - 1);
-  slider.value = state.dateIdx;
+  slider.max = state.results ? Math.max(1, dayOf(state.results.end)) : 1;
+  slider.step = 1;
+  slider.value = state.dates.length ? dayOf(state.dates[state.dateIdx]) : 0;
   slider.disabled = state.dates.length < 2;
   $('#play').disabled = state.dates.length < 2;
   const hasWater = liveResults().some(isWater);
@@ -884,7 +1161,7 @@ function buildTimeline() {
   renderPhaseNav();
 }
 
-$('#slider').addEventListener('input', e => selectDate(+e.target.value));
+$('#slider').addEventListener('input', e => { if (state.dates.length) selectDate(nearestDateIdx(+e.target.value)); });
 $('#play').addEventListener('click', () => (state.timer ? stopPlay() : startPlay()));
 $('#show-baseline').addEventListener('change', e => { state.showBaseline = e.target.checked; renderMapLayers(); renderLegend(); });
 function startPlay() {
@@ -906,7 +1183,8 @@ function selectDate(idx) {
   if (!state.dates.length) return;
   state.dateIdx = Math.max(0, Math.min(idx, state.dates.length - 1));
   const date = state.dates[state.dateIdx];
-  $('#slider').value = state.dateIdx;
+  $('#slider').value = dayOf(date);
+  $('#slider').setAttribute('aria-valuetext', date);
   $('#tl-date').textContent = date;
   const imaged = liveResults().filter(r => r.frames.some(f => f.stats && f.date === date)).map(r => r.ds.name);
   $('#tl-sub').textContent = imaged.length ? `New observations: ${imaged.join(', ')}` : 'Showing the latest observation of each dataset';
@@ -1001,18 +1279,23 @@ function drawTimelineSvg() {
           s += `<rect x="${xx - 4.5}" y="${y - 4.5}" width="9" height="9" fill="${wc.normal}" stroke="#2c4a6e"><title>${tip}</title></rect>`;
         } else {
           const weak = st.coveragePct < 25;
-          const fill = weak ? '#ffffff' : st.newKm2 >= Math.max(0.05, 0.005 * st.validKm2) ? wc.new : '#ffffff';
+          const fill = weak ? '#ffffff' : floodSignal(st) ? wc.new : '#ffffff';
           s += `<circle cx="${xx}" cy="${y}" r="5" fill="${fill}" stroke="${weak ? '#9aa3ae' : '#0b4f8a'}" stroke-width="1.5" ${weak ? 'stroke-dasharray="2 2"' : ''}><title>${tip}${weak ? '\nLow coverage – insufficient data' : ''}</title></circle>`;
         }
+      } else if (isDist(r)) {
+        const st = f.stats, weak = st.coveragePct < 25;
+        const fill = weak ? '#ffffff' : st.detectedKm2 > 0 ? ramp[st.stageKm2.confirmed.low + st.stageKm2.confirmed.high > 0 ? 3 : 1] : '#ffffff';
+        s += `<circle cx="${xx}" cy="${y}" r="5" fill="${fill}" stroke="${weak ? '#9aa3ae' : ramp[3]}" stroke-width="1.5" ${weak ? 'stroke-dasharray="2 2"' : ''}>` +
+             `<title>${esc(r.ds.name)} · ${f.date}\nValid coverage ${st.coveragePct.toFixed(0)} % · disturbed ${fmtKm(st.detectedKm2)} km² (${st.detectedPx} px)${weak ? '\nLow coverage – insufficient data' : ''}</title></circle>`;
       } else {
-        const lv = overallLevel(f.stats, res.grid.aoiKm2);
+        const lv = overallLevel(f.stats);
         const fill = lv ? ramp[lv - 1] : '#ffffff';
         s += `<circle cx="${xx}" cy="${y}" r="5" fill="${fill}" stroke="${ramp[3]}" stroke-width="1.5">` +
-             `<title>${esc(r.ds.name)} · ${f.date}\n${fmtKm(f.stats.affected)} km² detected (${LEVELS[lv - 1]?.name || 'none'})</title></circle>`;
+             `<title>${esc(r.ds.name)} · ${f.date}${isIndicator(r) ? ' (radar brightness indicator)' : ''}\n${fmtKm(f.stats.affected)} km² (${LEVELS[lv - 1]?.name || 'none'})</title></circle>`;
       }
     });
     if (r.status !== 'live') {
-      s += `<text x="${left + 6}" y="${y + 3}" font-size="10" fill="${C.err}" paint-order="stroke" stroke="#fff" stroke-width="3">${r.status === 'no-data' ? 'no NASA acquisitions in this period' : r.status === 'failed' ? 'not usable – see Data sources' : r.status + '…'}</text>`;
+      s += `<text x="${left + 6}" y="${y + 3}" font-size="10" fill="${C.err}" paint-order="stroke" stroke="#fff" stroke-width="3">${r.status === 'no-data' ? 'no usable acquisitions in this period' : r.status === 'failed' ? `${KIND_TEXT[r.errorKind] || 'not usable'} – see Data sources` : r.status + '…'}</text>`;
     }
   });
   if (state.dates.length) {
@@ -1103,14 +1386,15 @@ if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => drawTimeline
 else window.addEventListener('resize', () => drawTimelineSvg());
 
 function buildChart() {
-  if (state.chart) state.chart.destroy();
+  if (state.chart) { state.chart.destroy(); state.chart = null; }
+  if (!state.results || !state.dates.length) return;
   const labels = state.dates;
   const cursor = {
     id: 'cursor',
     afterDraw(chart) {
       const xs = chart.scales.x;
       if (!xs || !labels.length) return;
-      const xx = xs.getPixelForValue(state.dateIdx);
+      const xx = xs.getPixelForValue(dayOf(state.dates[state.dateIdx]));
       const c = chart.ctx;
       c.save(); c.strokeStyle = '#1d5fa6'; c.lineWidth = 2;
       c.beginPath(); c.moveTo(xx, chart.chartArea.top); c.lineTo(xx, chart.chartArea.bottom); c.stroke(); c.restore();
@@ -1123,7 +1407,7 @@ function buildChart() {
       const ev = activeEvent();
       const xs = chart.scales.x;
       if (!ev || !ev.band || ev.status === 'insufficient' || !xs) return;
-      const px = d => { const i = labels.indexOf(d); return i >= 0 ? xs.getPixelForValue(i) : d < labels[0] ? chart.chartArea.left : chart.chartArea.right; };
+      const px = d => Math.max(chart.chartArea.left, Math.min(chart.chartArea.right, xs.getPixelForValue(dayOf(d))));
       const { top, bottom } = chart.chartArea, c = chart.ctx;
       c.save();
       c.fillStyle = 'rgba(29,95,166,.06)';
@@ -1134,17 +1418,14 @@ function buildChart() {
     }
   };
   const live = liveResults();
-  const datasets = live.filter(r => !isRain(r)).map(r => {
+  const datasets = live.filter(r => !isRain(r) && !isIndicator(r)).map(r => {
     const ramp = PHENOMENA[r.ds.phenomenon].ramp;
     const water = isWater(r);
     return {
-      label: water ? `${r.ds.name} – newly inundated` : `${r.ds.name} (${r.ds.kind})`,
-      data: labels.map(d => {
-        const f = r.frames.find(ff => ff.stats && ff.date === d);
-        if (!f) return null;
-        if (water) return f.role === 'post' && f.stats.coveragePct >= 25 ? +f.stats.newKm2.toFixed(3) : null;
-        return +f.stats.affected.toFixed(3);
-      }),
+      label: water ? `${r.ds.name} – newly inundated` : isDist(r) ? `${r.ds.name} – disturbed area` : `${r.ds.name} (${r.ds.kind})`,
+      // only valid observations are plotted: a missing or failed observation is a gap, never a zero
+      data: r.frames.filter(f => f.stats && (water ? f.role === 'post' && f.stats.coveragePct >= 25 : true))
+        .map(f => ({ x: dayOf(f.date), y: +(water ? f.stats.newKm2 : f.stats.affected).toFixed(3), date: f.date })),
       borderColor: water ? ramp[2] : ramp[2], backgroundColor: ramp[2],
       borderDash: r.ds.kind === 'SAR' ? [6, 4] : [],
       spanGaps: true, tension: 0.2, pointRadius: 3, borderWidth: 1.5, yAxisID: 'y'
@@ -1154,30 +1435,34 @@ function buildChart() {
   if (rain) {
     datasets.push({
       type: 'bar', label: 'GPM IMERG rain, area mean (mm/h, context)', yAxisID: 'rain',
-      data: labels.map(d => { const f = rain.frames.find(ff => ff.rain && ff.date === d); return f ? +f.rain.mean.toFixed(2) : null; }),
+      data: rain.frames.filter(f => f.rain).map(f => ({ x: dayOf(f.date), y: +f.rain.mean.toFixed(2), date: f.date })),
       backgroundColor: 'rgba(107,127,153,.35)', borderWidth: 0, barThickness: 6
     });
   }
   const font = { size: 10, family: getComputedStyle(document.body).fontFamily };
   state.chart = new Chart($('#chart'), {
     type: 'line',
-    data: { labels, datasets },
+    data: { datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
       interaction: { mode: 'nearest', intersect: false },
       plugins: {
         legend: { position: 'bottom', labels: { boxWidth: 10, font } },
         title: { display: true, text: 'Detected area per dataset (km²) – water: newly inundated only', font: { ...font, size: 11 }, color: '#1b2430' },
-        tooltip: { callbacks: { label: c => `${c.dataset.label}: ${c.parsed.y}${c.dataset.yAxisID === 'rain' ? ' mm/h' : ' km²'}` } }
+        tooltip: { callbacks: {
+          title: items => (items[0] && items[0].raw && items[0].raw.date) || '',
+          label: c => `${c.dataset.label}: ${c.parsed.y}${c.dataset.yAxisID === 'rain' ? ' mm/h' : ' km²'}` } }
       },
       scales: {
         y: { beginAtZero: true, ticks: { font }, grid: { color: '#eceff3' }, title: { display: true, text: 'km²', font } },
         rain: { display: !!rain, position: 'right', beginAtZero: true, ticks: { font }, grid: { display: false }, title: { display: true, text: 'mm/h', font } },
-        x: { ticks: { font, maxRotation: 0, autoSkip: true }, grid: { display: false } }
+        x: { type: 'linear', min: 0, max: Math.max(1, dayOf(state.results.end)), grid: { display: false },
+          ticks: { font, maxRotation: 0, autoSkip: true, maxTicksLimit: 6,
+            callback: v => new Date(Date.parse(state.results.start) + v * 86400000).toISOString().slice(0, 10) } }
       },
       onClick: (e, els, chart) => {
-        const idx = chart.scales.x.getValueForPixel(e.x);
-        if (Number.isFinite(idx)) selectDate(Math.round(idx));
+        const day = chart.scales.x.getValueForPixel(e.x);
+        if (Number.isFinite(day)) selectDate(nearestDateIdx(day));
       }
     },
     plugins: [eventShade, cursor]
@@ -1198,9 +1483,19 @@ function addRaster(id, tiles, opacity) {
   map.addLayer({ id, type: 'raster', source: id, paint: { 'raster-opacity': opacity } }, 'mask-fill');
   MAP_LAYER_IDS.add(id);
 }
+function addImage(id, url, coordinates) {
+  map.addSource(id, { type: 'image', url, coordinates });
+  map.addLayer({ id, type: 'raster', source: id, paint: { 'raster-opacity': 0.92, 'raster-resampling': 'nearest' } }, 'mask-fill');
+  MAP_LAYER_IDS.add(id);
+}
 
+// Every call gets a sequence number; an older call that resumes late (e.g. during
+// playback) does nothing, so the map always shows the currently selected date.
+let renderSeq = 0;
 async function renderMapLayers() {
+  const seq = ++renderSeq;
   await mapReady;
+  if (seq !== renderSeq) return;
   removeDynamicLayers();
   const date = state.dates[state.dateIdx];
   const ctxId = $('#context').value;
@@ -1208,71 +1503,96 @@ async function renderMapLayers() {
     const c = CONTEXT_LAYERS.find(cc => cc.id === ctxId);
     addRaster('ctx-' + c.id, tileUrl(c.gibs, date || $('#end').value || today()), 1);
   }
-  if (!state.results || !date) return;
+  if (!state.results || !date || state.outdated) return;            // never draw results for other inputs
   if (state.view === 'original') {
     for (const r of liveResults()) {
-      if (!state.shown.has(r.ds.id)) continue;
+      if (!state.shown.has(r.ds.id) || !r.ds.gibs) continue;
       const f = isRain(r) ? r.frames.filter(ff => ff.rain && ff.date <= date).at(-1) : frameAt(r, date);
       if (f) addRaster('gibs-' + r.ds.id, tileUrl(r.ds.gibs, f.date), 0.9);
     }
-  } else {
-    const url = classifiedImage(date);
-    if (url) {
-      const [W, S, E, N] = state.results.grid.bbox;
-      map.addSource('classified', { type: 'image', url, coordinates: [[W, N], [E, N], [E, S], [W, S]] });
-      map.addLayer({ id: 'classified', type: 'raster', source: 'classified', paint: { 'raster-opacity': 0.92, 'raster-resampling': 'nearest' } }, 'mask-fill');
-      MAP_LAYER_IDS.add('classified');
-    }
+    return;
   }
+  const imgs = classifiedImages(date);
+  if (imgs.degree) {
+    const [W, S, E, N] = state.results.grid.bbox;
+    addImage('classified', imgs.degree, [[W, N], [E, N], [E, S], [W, S]]);
+  }
+  if (imgs.metric) addImage('classified-metric', imgs.metric, state.results.mgrid.corners);
 }
 
 function hexToRgb(h) { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
 
-function classifiedImage(date) {
-  const grid = state.results.grid;
+function newCanvas(grid) {
   const canvas = document.createElement('canvas');
   canvas.width = grid.w; canvas.height = grid.h;
   const ctx = canvas.getContext('2d');
   const img = ctx.createImageData(grid.w, grid.h);
   const put = (p, [r, g, b], a) => { img.data[p * 4] = r; img.data[p * 4 + 1] = g; img.data[p * 4 + 2] = b; img.data[p * 4 + 3] = a; };
-  const order = state.results.phen.filter(p => p !== 'water').sort((a, b) => PHENOMENA[a].priority - PHENOMENA[b].priority);
-  let any = false;
-  for (const pid of order) {
+  return { canvas, ctx, img, put, any: false, done() { if (!this.any) return null; ctx.putImageData(img, 0, 0); return canvas.toDataURL('image/png'); } };
+}
+const hatch = (grid, p) => ((p % grid.w) + Math.floor(p / grid.w)) % 6 < 2;
+
+/**
+ * Two overlays: imagery-based indicators on the degree grid (fire, chlorophyll), and
+ * product-raster results on the metric grid (vegetation disturbance, water). Only pixels
+ * with a detection are coloured; unobserved pixels are hatched – never the whole area.
+ */
+function classifiedImages(date) {
+  const res = state.results;
+  const out = { degree: null, metric: null };
+  // degree grid: fire / chlorophyll
+  const D = newCanvas(res.grid);
+  for (const pid of res.phen.filter(p => p === 'fire' || p === 'algae').sort((a, b) => PHENOMENA[a].priority - PHENOMENA[b].priority)) {
     const sum = summarize(pid, date);
     if (!sum) continue;
     const ramp = PHENOMENA[pid].ramp.map(hexToRgb);
-    const m = sum.merged;
-    for (let p = 0; p < m.length; p++) {
-      const lv = m[p];
-      if (lv >= 1 && lv <= 4) { put(p, ramp[lv - 1], 235); any = true; }
+    for (let p = 0; p < sum.merged.length; p++) {
+      const lv = sum.merged[p];
+      if (lv >= 1 && lv <= 4) { D.put(p, ramp[lv - 1], 235); D.any = true; }
     }
   }
-  // Water: only pixels actually classified as water are drawn (never the whole area).
-  if (state.results.phen.includes('water')) {
-    const ws = summarizeWater(date);
-    const wc = PHENOMENA.water.water;
-    const cNormal = hexToRgb(wc.normal), cNew = hexToRgb(wc.new), cUnknown = hexToRgb(wc.unknown), cOut = [128, 136, 146];
-    const h = ws.headline;
-    if (h) {
-      const base = h.r.baseline;
-      for (let p = 0; p < grid.w * grid.h; p++) {
-        if (!grid.mask[p]) continue;
-        if (state.showBaseline) {
-          if (base && base[p] === 1) { put(p, cNormal, 230); any = true; }
-          else if ((!base || base[p] === OUT) && ((p % grid.w) + Math.floor(p / grid.w)) % 6 < 2 && !img.data[p * 4 + 3]) { put(p, cOut, 110); any = true; }
-          continue;
-        }
-        const st = h.f.status[p];
-        if (st === 1) { put(p, cNormal, 225); any = true; }
-        else if (st === 2) { put(p, cNew, 245); any = true; }
-        else if (st === 3) { put(p, cUnknown, 225); any = true; }
-        else if (st === OUT && !img.data[p * 4 + 3] && ((p % grid.w) + Math.floor(p / grid.w)) % 6 < 2) { put(p, cOut, 110); any = true; }
+  out.degree = D.done();
+  // metric grid: vegetation disturbance (DIST) then water on top
+  const g = res.mgrid, M = newCanvas(g), cOut = [128, 136, 146];
+  const unobserved = new Uint8Array(g.w * g.h);
+  if (res.phen.includes('vegetation')) {
+    const vs = summarizeVeg(date);
+    if (vs.headline) {
+      const ramp = PHENOMENA.vegetation.ramp.map(hexToRgb), lv = vs.headline.f.levels;
+      for (let p = 0; p < lv.length; p++) {
+        if (!g.mask[p]) continue;
+        if (lv[p] >= 1 && lv[p] <= 4) { M.put(p, ramp[lv[p] - 1], 240); M.any = true; }
+        else if (lv[p] === OUT) unobserved[p] = 1;
       }
     }
   }
-  if (!any) return null;
-  ctx.putImageData(img, 0, 0);
-  return canvas.toDataURL('image/png');
+  if (res.phen.includes('water')) {
+    const ws = summarizeWater(date);
+    const wc = PHENOMENA.water.water;
+    const cNormal = hexToRgb(wc.normal), cNew = hexToRgb(wc.new), cUnknown = hexToRgb(wc.unknown);
+    const h = ws.headline;
+    if (h) {
+      const base = h.r.baseline;
+      for (let p = 0; p < g.w * g.h; p++) {
+        if (!g.mask[p]) continue;
+        if (state.showBaseline) {
+          if (base && (base[p] === 1 || base[p] === 2)) { M.put(p, cNormal, 230); M.any = true; }
+          else if (!base || base[p] === OUT) unobserved[p] = 1;
+          continue;
+        }
+        const st = h.f.status[p];
+        if (st === 1) { M.put(p, cNormal, 225); M.any = true; }
+        else if (st === 2) { M.put(p, cNew, 245); M.any = true; }
+        else if (st === 3) { M.put(p, cUnknown, 225); M.any = true; }
+        else if (st === OUT) unobserved[p] = 1;
+      }
+    }
+  }
+  for (let p = 0; p < unobserved.length; p++) {
+    if (unobserved[p] && hatch(g, p) && !M.img.data[p * 4 + 3]) { M.put(p, cOut, 110); M.any = true; }
+  }
+  out.metric = M.done();
+  return out;
 }
 
 document.querySelectorAll('.seg button[data-view]').forEach(b => b.addEventListener('click', () => {
@@ -1287,35 +1607,37 @@ function renderLegend() {
   const phen = state.results ? state.results.phen : selectedPhenomena();
   if (state.view === 'original') {
     setLegend(el, state.results
-      ? `<h4>NASA original colours</h4><div class="lg-note">NASA's own visualisation of the datasets ticked in Data sources. Switch to <b>Analysed</b> for this app's classification.</div>`
+      ? `<h4>NASA original colours</h4><div class="lg-note">NASA's own visualisation (for viewing only) of the datasets ticked in Data sources. Switch to <b>Analysed</b> for results computed from the product data.</div>`
       : '');
     return;
   }
-  const scaled = phen.filter(p => p !== 'water');
-  const wc = PHENOMENA.water.water;
+  const scaled = phen.filter(p => p === 'fire' || p === 'algae');
+  const wc = PHENOMENA.water.water, vp = PHENOMENA.vegetation;
   const date = state.dates[state.dateIdx];
   let mapNote = '';
-  if (phen.includes('water') && state.results && date) {
+  if (phen.includes('water') && state.results && date && !state.outdated) {
     const ws = summarizeWater(date);
     if (ws.headline) mapNote = state.showBaseline
       ? `Showing pre-event baseline of ${esc(ws.headline.r.ds.name)} (${esc(ws.headline.r.baselineDates.join(', ') || '—')})`
       : `Water layer: ${esc(ws.headline.r.ds.name)}, ${esc(ws.headline.f.date)}`;
   }
   setLegend(el, `
-    ${scaled.length ? `<h4>Change intensity</h4>
+    ${state.outdated ? '<div class="lg-note lg-warn">Results outdated – analysis layers hidden.</div>' : ''}
+    ${phen.includes('vegetation') ? `<h4>Vegetation disturbance <span class="term" tabindex="0" data-term="DIST">(OPERA DIST)</span></h4>
+      <div class="lg-cats">${vp.catNames.map((n, i) => `<span><i class="sw" style="background:${vp.ramp[i]}"></i>${n}</span>`).join('')}</div>` : ''}
+    ${scaled.length ? `<h4 class="lg-gap">Change intensity <small>(estimated from NASA imagery)</small></h4>
     <div class="lg-head"><span></span>${LEVELS.map(l => `<span>${l.name}</span>`).join('')}</div>
     ${scaled.map(pid => {
       const p = PHENOMENA[pid];
       return `<div class="lg-row"><span>${p.short}</span>${p.ramp.map((c, i) => `<span class="sw" style="background:${c}" title="${esc(p.levelHelp[i])}"></span>`).join('')}</div>`;
     }).join('')}` : ''}
-    ${phen.includes('water') ? `<h4 ${scaled.length ? 'class="lg-gap"' : ''}>Surface water <span class="term" tabindex="0" data-term="categorical">categories</span></h4>
+    ${phen.includes('water') ? `<h4 class="lg-gap">Surface water <span class="term" tabindex="0" data-term="categorical">categories</span></h4>
       <div class="lg-cats">
         <span><i class="sw" style="background:${wc.new}"></i>Newly inundated</span>
         <span><i class="sw" style="background:${wc.normal}"></i>Normal / permanent water</span>
         <span><i class="sw" style="background:${wc.unknown}"></i>Water, no baseline</span>
-        <span><i class="sw hatch"></i>Not observed</span>
       </div>${mapNote ? `<div class="lg-note">${mapNote}</div>` : ''}` : ''}
-    <div class="lg-note">Orange outline = your area of interest.</div>`);
+    <div class="lg-cats lg-gap"><span><i class="sw hatch"></i>Not validly observed</span><span><i class="sw" style="background:#ff7a00"></i>Area of interest</span></div>`);
 }
 
 // Collapsible legend; starts collapsed when the map is narrow, then remembers the choice.
@@ -1334,14 +1656,34 @@ function setLegend(el, body) {
 // ============================================================ findings panel
 const CONF_CLASS = { High: 'c-high', Medium: 'c-med', Low: 'c-low', 'Insufficient data': 'c-none' };
 
+const STATE_CLASS = { change: 'v-new', 'no-change': 'v-none', insufficient: 'v-na', 'data-error': 'v-err', 'processing-error': 'v-err', outdated: 'v-na' };
+const stateChip = pid => { const st = phenomenonState(pid); return `<span class="verdict ${STATE_CLASS[st]}" title="Analysis state">${STATE_TEXT[st][0].toUpperCase() + STATE_TEXT[st].slice(1)}</span>`; };
+/** Card when a phenomenon has no usable observation: say WHY, never show 0 km². */
+function noDataCard(pid, extra = '') {
+  const p = PHENOMENA[pid];
+  const rs = [...state.results.byId.values()].filter(r => r.ds.phenomenon === pid && !r.ds.context);
+  const lines = rs.map(r => `<li><b>${esc(r.ds.name)}</b>: ${esc(r.errors.at(-1) || STATUS_TEXT[r.status] || r.status)}</li>`).join('');
+  return `<section class="finding"><header class="f-head"><h3>${p.name}</h3>${stateChip(pid)}</header>
+    <p class="f-note">No area is reported because no valid observation was available – this is not the same as “no change”.</p>
+    <ul class="f-why">${lines}</ul>${extra}</section>`;
+}
+
 function renderFindings() {
   const el = $('#findings');
-  if (!state.results || !state.dates.length) return;
+  if (!state.results) return;
   const date = state.dates[state.dateIdx];
-  const grid = state.results.grid;
-  el.innerHTML = `<p class="f-context">Area of interest <b>${fmtKm(grid.aoiKm2)} km²</b> · date <b>${date}</b> (latest observation of each dataset on or before this date)</p>` +
+  const grid = state.results.mgrid;
+  const banner = '<div class="outdated-banner" ' + (state.outdated ? '' : 'hidden') + '></div>';
+  if (!date) {
+    el.innerHTML = banner + `<p class="f-context">Area of interest <b>${fmtKm(grid.aoiKm2)} km²</b> · no usable observation in ${state.results.start} → ${state.results.end}.</p>` +
+      state.results.phen.map(pid => noDataCard(pid)).join('');
+    if (state.outdated) markBanners();
+    return;
+  }
+  el.innerHTML = banner + `<p class="f-context">Area of interest <b>${fmtKm(grid.aoiKm2)} km²</b> · date <b>${date}</b> (latest valid observation of each dataset on or before this date)</p>` +
     eventSummary(date) +
-    state.results.phen.map(pid => (pid === 'water' ? waterFinding(date) : intensityFinding(pid, date))).join('');
+    state.results.phen.map(pid => (pid === 'water' ? waterFinding(date) : pid === 'vegetation' ? vegFinding(date) : intensityFinding(pid, date))).join('');
+  if (state.outdated) markBanners();
   el.querySelectorAll('[data-goto-ev]').forEach(b => b.addEventListener('click', () => selectEvent(b.dataset.gotoEv, b.dataset.phase)));
 }
 
@@ -1388,12 +1730,9 @@ function intensityFinding(pid, date) {
   const p = PHENOMENA[pid];
   const grid = state.results.grid;
   const sum = summarize(pid, date);
-  if (!sum) {
-    return `<section class="finding"><header class="f-head"><h3>${p.name}</h3><span class="badge none">No data</span></header>
-      <p class="f-note">None of this phenomenon's NASA datasets had usable images for this area and period. See Data sources.</p></section>`;
-  }
+  if (!sum) return noDataCard(pid);
   const st = sum.stats;
-  const lvName = sum.level ? LEVELS[sum.level - 1].name : st.affected > 0 ? 'Below threshold' : 'None detected';
+  const lvName = sum.level ? `Highest: ${LEVELS[sum.level - 1].name}` : 'None detected';
   const badgeStyle = sum.level ? `style="background:${p.ramp[sum.level - 1]};${sum.level <= 1 ? 'color:#1b2430' : ''}"` : '';
   const trendCls = Math.abs(sum.trend) < 0.01 ? 'flat' : sum.trend > 0 ? 'up' : 'down';
   const mag = Math.abs(sum.trend);
@@ -1412,7 +1751,7 @@ function intensityFinding(pid, date) {
   const observed = sum.rs.some(r => r.ds.method === 'sar')
     ? `Radar intensity = how much the <span class="term" tabindex="0" data-term="backscatter">backscatter</span> dropped compared with the first date (<span class="term" tabindex="0" data-term="change">change detection</span>).` : '';
   return `<section class="finding">
-    <header class="f-head"><h3>${p.name}</h3><span class="badge ${sum.level ? '' : 'none'}" ${badgeStyle} title="Highest intensity level covering at least 0.25 km² or 0.5 % of the area">${lvName}</span></header>
+    <header class="f-head"><h3>${p.name} <small class="est">estimated from NASA imagery</small></h3><span class="badge ${sum.level ? '' : 'none'}" ${badgeStyle} title="Highest intensity level present (any area); the area of each level is listed below">${lvName}</span></header>
     <div class="f-big">${fmtKm(st.affected)} km² <small>detected · ${st.affectedPctOfAoi.toFixed(1)} % of area</small></div>
     <div class="f-trend ${trendCls}">${trendTxt}</div>
     <div class="stack">${stack}</div>
@@ -1428,15 +1767,59 @@ function termFor(kind) {
   return kind === 'SAR' ? `<span class="term" tabindex="0" data-term="SAR">SAR</span>` : esc(k);
 }
 
+/** Vegetation disturbance from the OPERA DIST rasters (numbers, not display colours). */
+function vegFinding(date) {
+  const p = PHENOMENA.vegetation;
+  const vs = summarizeVeg(date);
+  if (!vs.headline) return noDataCard('vegetation', indicatorTable(vs));
+  const h = vs.headline, st = h.f.stats, set = state.results.settings;
+  const g = state.results.mgrid, aoiPx = g.aoiPixels || 1;
+  const pct = px => `${((100 * px) / aoiPx).toFixed(0)} %`;
+  const stageRow = (name, k, help) => `<tr><td><b>${name}</b><small>${help}</small></td><td class="km">${fmtKm(st.stageKm2[k].low)} km²</td><td class="km">${fmtKm(st.stageKm2[k].high)} km²</td></tr>`;
+  const cats = p.catNames.map((n, i) => `<span><i class="sw" style="background:${p.ramp[i]}"></i>${n}</span>`).join('');
+  const removed = [
+    st.belowLossKm2 > 0 ? `${fmtKm(st.belowLossKm2)} km² flagged by DIST but below the ${set.minLossPct} % loss setting` : '',
+    st.smallPatchKm2 > 0 ? `${fmtKm(st.smallPatchKm2)} km² in patches smaller than ${set.minPatchHa} ha` : '',
+    st.anomalyOnlyKm2 > 0 ? `${fmtKm(st.anomalyOnlyKm2)} km² with ≥ ${set.minLossPct} % loss anomaly but no DIST alert (not counted)` : '',
+    st.magnitudeUnknownPx > 0 ? `${fmtKm(st.magnitudeUnknownPx * g.rowArea[0])} km² detected with unknown loss magnitude (anomaly band no data) – kept` : ''
+  ].filter(Boolean);
+  const rows = vs.rows.map(x => `<tr class="${x === h ? 'is-head' : ''}"><td>${esc(x.r.ds.name.replace(/^OPERA /, ''))}<small>${termFor(x.r.ds.kind)} · ${x.r.ds.id === 'dist-s1' ? 'generic surface disturbance' : 'vegetation'}</small></td>
+    <td>${x.f.date}</td><td class="num">${x.f.stats.coveragePct.toFixed(0)} %</td><td class="num">${fmtKm(x.f.stats.detectedKm2)}</td><td class="num">${x.f.stats.patches}</td></tr>`).join('');
+  return `<section class="finding veg">
+    <header class="f-head"><h3>${p.name}</h3>${stateChip('vegetation')}</header>
+    <div class="f-big">${fmtKm(st.detectedKm2)} km² <small>disturbed · ${st.detectedPctOfValid.toFixed(2)} % of the validly observed area · ${st.detectedPx.toLocaleString()} pixels in ${st.patches} patch(es)</small></div>
+    <table class="levels dist-table">
+      <thead><tr><th>Stage <span class="term" tabindex="0" data-term="diststage">ⓘ</span></th><th class="km">&lt; 50 % loss</th><th class="km">≥ 50 % loss</th></tr></thead>
+      ${stageRow('Confirmed', 'confirmed', 'repeated detections – highest confidence')}
+      ${stageRow('Provisional', 'provisional', 'detected more than once, not yet confirmed')}
+      ${stageRow('First detection', 'first', 'single detection – lowest confidence')}
+    </table>
+    <dl class="facts">
+      <dt>Loss magnitude</dt><dd>${st.meanLossPct !== null ? `mean ${st.meanLossPct.toFixed(0)} %, max ${st.lossMax} % <small>(VEG-ANOM-MAX)</small>` : '<span class="muted">not available</span>'}</dd>
+      <dt><span class="term" tabindex="0" data-term="coverage">Valid coverage</span></dt><dd>${pct(st.validPx)} of area <small>· masked / no data ${pct(st.invalidPx)} · not covered ${pct(st.missingPx)}</small></dd>
+      <dt>Analysis settings</dt><dd>minimum loss ${set.minLossPct} % · minimum patch ${set.minPatchHa ? `${set.minPatchHa} ha` : 'none'} <small>(adjust in Analysis setup)</small></dd>
+      ${removed.length ? `<dt>Not counted</dt><dd><small>${removed.join('<br>')}</small></dd>` : ''}
+      ${vs.agreement ? `<dt>Radar check</dt><dd><small>${esc(vs.agreement.with)}: ${vs.agreement.overlapPct !== null ? `${vs.agreement.overlapPct.toFixed(0)} % overlap of detections` : 'no detections in common area'} over ${fmtKm(vs.agreement.commonKm2)} km² observed by both</small></dd>` : ''}
+      <dt>Observation</dt><dd>${h.f.date} · ${esc(h.r.ds.name)}${h.r.version ? ` <small>v${esc(h.r.version)}</small>` : ''}</dd>
+    </dl>
+    <div class="lg-cats f-cats">${cats}</div>
+    <table class="src-table"><thead><tr><th>Source</th><th>Date</th><th class="num">Cover</th><th class="num">Disturbed km²</th><th class="num">Patches</th></tr></thead><tbody>${rows}</tbody></table>
+    ${indicatorTable(vs)}
+    <p class="f-note">OPERA DIST detects vegetation disturbance; it does not establish the cause (clearing, fire, drought, harvest, flooding…). Numbers come from the VEG-DIST-STATUS and VEG-ANOM-MAX rasters, not from map colours.</p>
+  </section>`;
+}
+
+function indicatorTable(vs) {
+  if (!vs.indicators || !vs.indicators.length) return '';
+  return `<details class="why ind"><summary>Radar backscatter indicators (not a disturbance classification)</summary>
+    <ul>${vs.indicators.map(x => `<li>${esc(x.r.ds.name)} · ${x.f.date}: ${fmtKm(x.f.stats.affected)} km² darkened vs ${esc(x.r.reference || 'first image')} – brightness of NASA's radar visualisation, not added to the disturbance area</li>`).join('')}</ul></details>`;
+}
+
 function waterFinding(date) {
   const p = PHENOMENA.water;
   const ws = summarizeWater(date);
   const sensorWord = r => `${esc(r.ds.name)} (${termFor(r.ds.kind)})`;
-  if (!ws.headline) {
-    return `<section class="finding water"><header class="f-head"><h3>${p.name}</h3><span class="badge none">Insufficient data</span></header>
-      <p class="f-note">No usable water observation for this area and period. See Data sources for each product's status.</p>
-      ${rainLine(ws)}</section>`;
-  }
+  if (!ws.headline) return noDataCard('water', rainLine(ws));
   const { headline: h, confidence: conf, verdict } = ws;
   const st = h.f.stats;
   const isBase = h.f.role === 'baseline';
@@ -1462,13 +1845,15 @@ function waterFinding(date) {
   return `<section class="finding water">
     <header class="f-head"><h3>${p.name}</h3><span class="verdict ${vClass}">${verdict}</span></header>
     ${big}
+    ${!isBase && !insufficient && !floodSignal(st) && st.newKm2 > 0 ? `<p class="f-note">${fmtKm(st.newKm2)} km² of new water is below the flood-signal setting (≥ ${FLOOD_SIGNAL.pctOfObserved} % of the observed area or ≥ ${FLOOD_SIGNAL.km2} km²) and is reported but not called a flood.</p>` : ''}
     <dl class="facts">
       <dt>Water extent</dt><dd>${fmtKm(st.waterKm2)} km² <small>(${st.waterPctOfObserved.toFixed(1)} % of observed)</small></dd>
       <dt><span class="sw-inline" style="background:${wc.normal}"></span>Normal / permanent</dt><dd>${fmtKm(st.normalKm2)} km²</dd>
       <dt><span class="sw-inline" style="background:${wc.new}"></span>Newly inundated</dt><dd>${isBase ? '— (baseline)' : !h.r.baseline ? '— (no baseline)' : `${fmtKm(st.newKm2)} km²`}</dd>
       ${st.unknownKm2 > 0.005 ? `<dt><span class="sw-inline" style="background:${wc.unknown}"></span>Water, no baseline</dt><dd>${fmtKm(st.unknownKm2)} km² <small>not counted as new</small></dd>` : ''}
       ${st.partialKm2 + st.inundatedVegKm2 > 0.005 ? `<dt>of which</dt><dd><small>${st.partialKm2 > 0.005 ? `<span class="term" tabindex="0" data-term="partial">partial water</span> ${fmtKm(st.partialKm2)} km²` : ''}${st.partialKm2 > 0.005 && st.inundatedVegKm2 > 0.005 ? ' · ' : ''}${st.inundatedVegKm2 > 0.005 ? `<span class="term" tabindex="0" data-term="inundated">inundated vegetation</span> ${fmtKm(st.inundatedVegKm2)} km²` : ''}</small></dd>` : ''}
-      <dt><span class="term" tabindex="0" data-term="coverage">Valid coverage</span></dt><dd>${st.coveragePct.toFixed(0)} % of area ${covBar}</dd>
+      <dt><span class="term" tabindex="0" data-term="coverage">Valid coverage</span></dt><dd>${st.coveragePct.toFixed(0)} % of area ${covBar}
+        <small>masked / invalid ${((100 * (st.invalidPx || 0)) / (state.results.mgrid.aoiPixels || 1)).toFixed(0)} % · not covered ${((100 * (st.missingPx || 0)) / (state.results.mgrid.aoiPixels || 1)).toFixed(0)} %</small></dd>
       <dt><span class="term" tabindex="0" data-term="confidence">Confidence</span></dt><dd><span class="conf ${CONF_CLASS[conf.level]}">${conf.level}</span>
         <details class="why"><summary>Why?</summary><ul>${conf.reasons.map(t => `<li>${esc(t)}</li>`).join('')}</ul></details></dd>
       <dt><span class="term" tabindex="0" data-term="baseline">Baseline</span></dt><dd>${baseDates.length ? `${baseDates[0]}${baseDates.length > 1 ? ` → ${baseDates.at(-1)}` : ''} <small>(${baseDates.length} obs., ${h.r.baselineCoverPct.toFixed(0)} % of area known)</small>` : '<span class="muted">none</span>'}</dd>
@@ -1491,6 +1876,29 @@ function rainLine(ws) {
 }
 
 // ============================================================ data sources panel
+const STATUS_TEXT = { queued: 'Queued', searching: 'Searching NASA catalogue…', loading: 'Reading NASA data…', live: 'Live data', failed: 'Not usable', 'no-data': 'No usable acquisitions' };
+const KIND_TEXT = { retrieval: 'data retrieval error', auth: 'authentication error', 'auth-config': 'Earthdata access not configured', timeout: 'timeout', malformed: 'malformed file', 'missing-band': 'band missing', processing: 'processing error', insufficient: 'insufficient data', 'no-overlap': 'does not cover the area', ok: 'ok' };
+
+/** Per-acquisition diagnostics (product, version, granules, AOI overlap, pixel counts…). */
+function diagnosticsTable(r) {
+  if (!r.diagnostics || !r.diagnostics.length) return '';
+  const g = state.results.mgrid, cellKm2 = g.rowArea[0];
+  const raster = !!r.ds.raster;
+  const names = r.ds.method === 'dist' ? DIST_STATUS_NAMES : r.ds.method === 'water' ? WATER_CODES[r.ds.waterCodes] : null;
+  const histText = h => (h ? Object.entries(h).sort((a, b) => b[1] - a[1]).slice(0, 8)
+    .map(([v, c]) => `${v}${names ? ` (${names[v] || 'undocumented → invalid'})` : ''}: ${c.toLocaleString()}`).join(' · ') : '');
+  const rows = r.diagnostics.slice().sort((a, b) => a.date.localeCompare(b.date)).map(d => {
+    const gr = (d.granules || []).map(x => `<div class="dg-g"><code>${esc(x.granule)}</code> – ${esc(KIND_TEXT[x.status] || x.status)}${x.aoiIntersectionPct != null ? ` · covers ${x.aoiIntersectionPct.toFixed(0)} % of AOI` : ''}${x.productVersion ? ` · file v${esc(x.productVersion)}` : ''}${x.epsg ? ` · EPSG:${x.epsg}, ${x.pixelSize} m` : ''}${x.message ? ` · ${esc(x.message)}` : ''}${x.warning ? ` · <b>${esc(x.warning)}</b>` : ''}</div>`).join('');
+    return `<tr><td>${d.date}</td><td>${esc(KIND_TEXT[d.status] || d.status || '')}${d.message ? `<small>${esc(d.message)}</small>` : ''}</td>
+      <td class="num">${d.validPx != null ? d.validPx.toLocaleString() : '—'}</td><td class="num">${d.invalidPx != null ? d.invalidPx.toLocaleString() : '—'}</td>
+      <td class="num">${d.missingPx != null ? d.missingPx.toLocaleString() : '—'}</td><td class="num">${d.detectedPx != null ? d.detectedPx.toLocaleString() : '—'}</td>
+      <td class="num">${d.areaKm2 != null ? fmtKm(d.areaKm2) : '—'}</td></tr>
+      ${gr || d.hist || d.warning ? `<tr class="dg-sub"><td colspan="7">${gr}${d.hist ? `<div class="dg-h">Raw values in AOI: ${histText(d.hist)}</div>` : ''}${d.warning ? `<div><b>${esc(d.warning)}</b></div>` : ''}</td></tr>` : ''}`;
+  }).join('');
+  return `<details class="diag"><summary>Diagnostics – ${r.diagnostics.length} observation(s)${raster ? ` · grid ${g.cell} m${g.native ? ' (native)' : ' (sampled)'} · 1 px = ${(cellKm2 * 100).toFixed(2)} ha` : ' · NASA imagery'}</summary>
+    <table class="src-table dg"><thead><tr><th>Date</th><th>Status</th><th class="num">Valid px</th><th class="num">Invalid px</th><th class="num">Missing px</th><th class="num">${r.ds.method === 'water' ? 'Water' : 'Detected'} px</th><th class="num">${r.ds.method === 'water' ? 'New km²' : 'Area km²'}</th></tr></thead><tbody>${rows}</tbody></table></details>`;
+}
+
 function renderSources() {
   const el = $('#sources');
   const res = state.results;
@@ -1498,8 +1906,9 @@ function renderSources() {
     `<div class="s-note"><b>${esc(n.name)}</b> <span class="s-tag">${esc(n.used)}</span><p>${esc(n.why)}</p></div>`).join('');
   if (!res) { el.innerHTML = '<p class="empty">Run an analysis to see which NASA datasets were used.</p>' + notes; return; }
   const date = state.dates[state.dateIdx];
-  const statusText = { queued: 'Queued', searching: 'Searching NASA catalogue…', loading: 'Downloading NASA images…', live: 'Live data', failed: 'Not usable', 'no-data': 'No acquisitions' };
-  el.innerHTML = `<p class="f-context">Every number comes from these NASA sources. Catalogue counts are live queries to <span class="term" tabindex="0" data-term="CMR">NASA CMR</span>; images are <span class="term" tabindex="0" data-term="GIBS">NASA GIBS</span> visualisations.</p>` +
+  const statusText = STATUS_TEXT;
+  el.innerHTML = (state.outdated ? '<div class="outdated-banner"></div>' : '') +
+    `<p class="f-context">Catalogue counts are live queries to <span class="term" tabindex="0" data-term="CMR">NASA CMR</span>. Vegetation disturbance and water are computed from the products' own GeoTIFF rasters; fire, chlorophyll, rainfall and radar-brightness indicators are estimated from <span class="term" tabindex="0" data-term="GIBS">NASA GIBS</span> imagery.</p>` +
     [...res.byId.values()].map(r => {
       const ds = r.ds;
       const ramp = PHENOMENA[ds.phenomenon].ramp;
@@ -1515,14 +1924,13 @@ function renderSources() {
       if (ds.method === 'sar') method = `Method: radar <span class="term" tabindex="0" data-term="backscatter">backscatter</span> darkening vs reference image${r.reference ? ` (${r.reference})` : ''}`;
       else if (ds.method === 'presence') method = 'Method: every NASA fire-detection pixel counts';
       else if (ds.method === 'water') {
-        const info = r.classifier ? r.classifier.info : [];
-        const used = info.filter(i => i.cls !== OUT).map(i => `${esc(i.label)} → ${W_NAMES[i.cls]}`);
-        const excl = info.filter(i => i.cls === OUT).map(i => esc(i.label));
-        method = r.classifier
-          ? `Method: categorical water classes from NASA's colour map.<br><span class="s-sub">Used: ${used.join(' · ') || '—'}</span><br><span class="s-sub">Excluded as invalid: ${excl.join(' · ') || '—'}</span>` +
-            (r.classifier.transparentIsDry ? '<br><span class="s-sub">“Not water” is drawn transparent by NASA, so empty pixels count as dry only on dates with a catalogued acquisition.</span>' : '') +
-            (r.baselineDates ? `<br>Baseline: ${r.baselineDates.length ? esc(r.baselineDates.join(', ')) : 'none'}` : '')
-          : 'Method: colour map pending';
+        const table = WATER_CODES[ds.waterCodes];
+        const used = Object.entries(table).filter(([, n]) => n !== 'invalid').map(([v, n]) => `${v} = ${n.replace('_', ' ')}`);
+        const excl = Object.entries(table).filter(([, n]) => n === 'invalid').map(([v]) => v);
+        method = `Method: band <code>${esc(ds.raster.bands[0])}</code> decoded with the documented classes (${used.join(' · ')}); ${excl.join(', ')} and any undocumented value = invalid. Nearest-neighbour sampling, 30 m.` +
+          (r.baselineDates ? `<br>Baseline: ${r.baselineDates.length ? esc(r.baselineDates.join(', ')) : 'none'}${r.baselineAssumed ? ' <b>(assumed pre-event – no event date)</b>' : ''}` : '');
+      } else if (ds.method === 'dist') {
+        method = `Method: bands <code>${ds.raster.bands.map(esc).join('</code> + <code>')}</code> decoded numerically (status 1–8 = first / provisional / confirmed, &lt;50 % and ≥50 %; 0 = none; 255 = no data). Nearest-neighbour sampling, 30 m.`;
       } else if (ds.method === 'rain') method = 'Method: area-mean precipitation rate from NASA’s colour map (context only)';
       else method = r.colormap ? `Method: ${r.classifier.info.length} classes read from NASA's colour map${r.units ? ` (${esc(r.units)})` : ''}` : 'Method: colour map pending';
       const curLine = cur ? (isRain(r) ? ` · on map: <b>${cur.date}</b>` : ` · on map: <b>${cur.date}</b> (valid coverage ${(cur.coverage * 100).toFixed(0)} % of area)`) : '';
@@ -1534,16 +1942,18 @@ function renderSources() {
         <div class="s-line">${cmrLine}</div>
         <div class="s-line">Analysed: <b>${ok.length}</b> of ${r.frames.length || '–'} dates${curLine}</div>
         <div class="s-line">${method}</div>
-        <div class="s-line s-sub">GIBS layer <code>${esc(ds.gibs)}</code> · CMR <code>${esc(ds.cmr)}</code></div>
-        ${(r.mismatches || []).map(m => `<div class="s-err">Class value ${esc(m.value)} is labelled “${esc(m.label)}” by NASA; the documented code was used.</div>`).join('')}
+        <div class="s-line s-sub">${ds.gibs ? `GIBS layer <code>${esc(ds.gibs)}</code> (${ds.raster ? 'map display only' : 'analysed imagery'}) · ` : ''}CMR <code>${esc(ds.cmr)}</code>${r.version ? ` · collection version <b>${esc(r.version)}</b>` : ''}${r.cmr && r.cmr.pages > 1 ? ` · ${r.cmr.pages} catalogue pages` : ''}</div>
+        ${r.errorKind ? `<div class="s-err"><b>${esc(KIND_TEXT[r.errorKind] || r.errorKind)}</b></div>` : ''}
         ${r.errors.map(e => `<div class="s-err">${esc(e)}</div>`).join('')}
-        ${r.status === 'live' ? `<label class="s-show"><input type="checkbox" data-show="${ds.id}" ${state.shown.has(ds.id) ? 'checked' : ''}> Show NASA original on map (“NASA original” view)</label>` : ''}
+        ${diagnosticsTable(r)}
+        ${r.status === 'live' && ds.gibs ? `<label class="s-show"><input type="checkbox" data-show="${ds.id}" ${state.shown.has(ds.id) ? 'checked' : ''}> Show NASA original on map (“NASA original” view)</label>` : ''}
         <div class="s-links">
           <a href="${earthdataSearchUrl(ds.cmr)}" target="_blank" rel="noopener">Earthdata Search ↗</a>
-          <a href="${worldviewUrl(ds.gibs, cur ? cur.date : res.end, res.grid.bbox)}" target="_blank" rel="noopener">NASA Worldview ↗</a>
+          ${ds.gibs ? `<a href="${worldviewUrl(ds.gibs, cur ? cur.date : res.end, res.grid.bbox)}" target="_blank" rel="noopener">NASA Worldview ↗</a>` : ''}
         </div>
       </article>`;
     }).join('') + notes;
+  if (state.outdated) markBanners();
   el.querySelectorAll('[data-show]').forEach(cb => cb.addEventListener('change', () => {
     if (cb.checked) state.shown.add(cb.dataset.show); else state.shown.delete(cb.dataset.show);
     renderMapLayers();
@@ -1571,22 +1981,29 @@ function download(name, text, type) {
 }
 
 $('#export-csv').addEventListener('click', () => {
-  const lines = ['phenomenon,dataset,kind,satellites,date,image_coverage_pct,detected_km2,low_km2,moderate_km2,high_km2,severe_km2,pct_of_area,' +
-    'water_role,valid_km2,water_km2,normal_water_km2,new_water_km2,new_pct_of_observed,rain_mean_mm_h,gibs_layer,cmr_short_name'];
-  const n4 = v => (v == null ? '' : v.toFixed(4));
+  const lines = ['phenomenon,dataset,kind,satellites,date,source_type,valid_coverage_pct,valid_px,invalid_px,missing_px,detected_km2,' +
+    'dist_first_low_km2,dist_first_high_km2,dist_provisional_low_km2,dist_provisional_high_km2,dist_confirmed_low_km2,dist_confirmed_high_km2,mean_loss_pct,' +
+    'low_km2,moderate_km2,high_km2,severe_km2,water_role,water_km2,normal_water_km2,new_water_km2,new_pct_of_observed,rain_mean_mm_h,cmr_short_name,collection_version'];
+  const n4 = v => (v == null ? '' : (+v).toFixed(4));
+  const set = state.results.settings;
+  lines.unshift(`# EarthScope export · area ${n4(state.results.mgrid.aoiKm2)} km² · ${state.results.start}..${state.results.end} · vegetation settings: min loss ${set.minLossPct} %, min patch ${set.minPatchHa} ha`);
   for (const r of state.results.byId.values()) {
     for (const f of r.frames) {
       if (!f.stats && !f.rain) continue;
       const s = f.stats || {};
-      const water = isWater(r), rain = isRain(r);
+      const water = isWater(r), rain = isRain(r), dist = isDist(r), img = !water && !dist && !rain;
+      const st = dist ? s.stageKm2 : null;
       lines.push([r.ds.phenomenon, `"${r.ds.name}"`, r.ds.kind, `"${r.ds.satellites}"`, f.date,
+        r.ds.raster ? 'product raster' : 'GIBS imagery',
         f.coverage == null ? '' : (f.coverage * 100).toFixed(1),
-        water ? n4(s.newKm2) : rain ? '' : n4(s.affected),
-        ...[1, 2, 3, 4].map(l => (water || rain ? '' : n4(s.km2[l]))),
-        water ? s.newPctOfObserved.toFixed(3) : rain ? '' : s.affectedPctOfAoi.toFixed(3),
-        water ? f.role : '', water ? n4(s.validKm2) : '', water ? n4(s.waterKm2) : '', water ? n4(s.normalKm2) : '',
+        s.validPx ?? '', s.invalidPx ?? '', s.missingPx ?? '',
+        water ? n4(s.newKm2) : rain ? '' : n4(dist ? s.detectedKm2 : s.affected),
+        ...(dist ? [st.first.low, st.first.high, st.provisional.low, st.provisional.high, st.confirmed.low, st.confirmed.high].map(n4) : ['', '', '', '', '', '']),
+        dist && s.meanLossPct != null ? s.meanLossPct.toFixed(1) : '',
+        ...[1, 2, 3, 4].map(l => (img ? n4(s.km2[l]) : '')),
+        water ? f.role : '', water ? n4(s.waterKm2) : '', water ? n4(s.normalKm2) : '',
         water ? n4(s.newKm2) : '', water ? s.newPctOfObserved.toFixed(3) : '', rain ? f.rain.mean.toFixed(3) : '',
-        r.ds.gibs, r.ds.cmr].join(','));
+        r.ds.cmr, r.version || ''].join(','));
     }
   }
   download('earthscope-results.csv', lines.join('\n'), 'text/csv');
@@ -1598,8 +2015,12 @@ $('#export-json').addEventListener('click', () => {
   const ws = res.phen.includes('water') && date ? summarizeWater(date) : null;
   const out = {
     generated: new Date().toISOString(),
-    area: { polygon_lonlat: res.aoi.polygon, bbox: res.grid.bbox, km2: res.grid.aoiKm2 },
+    area: { polygon_lonlat: res.aoi.polygon, bbox: res.grid.bbox, km2: res.mgrid.aoiKm2,
+      analysis_grid: { crs: `EPSG:${res.mgrid.epsg}`, cell_m: res.mgrid.cell, native_30m: res.mgrid.native, cells: res.mgrid.aoiPixels } },
     period: { start: res.start, end: res.end, flood_event_date: res.eventDate || null },
+    analysis_states: Object.fromEntries(res.phen.map(pid => [pid, STATE_TEXT[phenomenonState(pid)]])),
+    settings: { vegetation_min_loss_pct: res.settings.minLossPct, vegetation_min_patch_ha: res.settings.minPatchHa,
+      flood_signal: FLOOD_SIGNAL, note: 'analysis settings, not universal scientific definitions' },
     events: (res.events || []).map(e => ({
       id: e.id, phenomenon: e.phenomenon, title: e.title, status: e.status,
       onset_window: e.onset ? { earliest: e.onset.earliest, latest: e.onset.latest, basis: e.onset.basis } : null,
@@ -1622,11 +2043,14 @@ $('#export-json').addEventListener('click', () => {
     } : null,
     datasets: [...res.byId.values()].map(r => ({
       id: r.ds.id, name: r.ds.name, phenomenon: r.ds.phenomenon, kind: r.ds.kind, satellites: r.ds.satellites,
-      agency: r.ds.agency, gibs_layer: r.ds.gibs, cmr_short_name: r.ds.cmr, status: r.status, errors: r.errors,
-      cmr: r.cmr ? { hits: r.cmr.hits, acquisition_days: r.cmr.dates, query: r.cmr.query } : null,
-      water_classes: isWater(r) && r.classifier ? r.classifier.info.map(i => ({ label: i.label, value: i.value, class: i.cls === OUT ? 'invalid' : W_NAMES[i.cls] })) : undefined,
-      baseline_dates: r.baselineDates,
-      frames: r.frames.map(f => ({ date: f.date, role: f.role, error: f.error || null, coverage: f.coverage ?? null, stats: f.stats || null, rain_mm_h: f.rain || undefined }))
+      agency: r.ds.agency, gibs_layer: r.ds.gibs, cmr_short_name: r.ds.cmr, collection_version: r.version || null,
+      numbers_from: r.ds.raster ? `product raster bands ${r.ds.raster.bands.join(', ')}` : 'GIBS imagery (estimate)',
+      status: r.status, error_kind: r.errorKind || null, errors: r.errors,
+      cmr: r.cmr ? { hits: r.cmr.hits, returned: r.cmr.returned, truncated: !!r.cmr.truncated, acquisition_days: r.cmr.dates, query: r.cmr.query } : null,
+      water_class_table: isWater(r) ? WATER_CODES[r.ds.waterCodes] : undefined,
+      baseline_dates: r.baselineDates, baseline_assumed: r.baselineAssumed || undefined,
+      diagnostics: r.diagnostics,
+      frames: r.frames.map(f => ({ date: f.date, role: f.role, error: f.error || null, error_kind: f.errorKind || null, coverage: f.coverage ?? null, stats: f.stats || null, rain_mm_h: f.rain || undefined }))
     }))
   };
   download('earthscope-results.json', JSON.stringify(out, null, 2), 'application/json');
@@ -1637,21 +2061,21 @@ $('#export-json').addEventListener('click', () => {
 const panelHas = sel => () => document.querySelector(sel);
 initTour([
   { title: 'Welcome to EarthScope',
-    body: `<p>EarthScope measures change on Earth’s surface – vegetation loss, flooding, fires and algae blooms – from NASA radar and optical satellites.</p>
+    body: `<p>EarthScope measures change on Earth’s surface – vegetation disturbance, flooding, fires and algae blooms – from NASA radar and optical satellites.</p>
       <p>Every number comes from real NASA observations. This tour shows the eight steps of an analysis. Use the arrow keys or the buttons; press Esc to leave.</p>` },
   { title: 'Choose an area of interest', target: panelHas('#card-aoi'), before: () => revealPanel('panel-controls'),
     body: `<p>Type latitude and longitude, or pick a ready-made example. One point makes a circle, two a rectangle, three or more a polygon.</p>
-      <p>You can also <b>middle-click</b> the map, or use <b>Add point</b>: move the map under the crosshair and press <b>Add point here</b>. Ordinary clicks never add points.</p>` },
+      <p>You can also <b>middle-click</b> the map, or turn on <b>Add point</b> mode: then one click or tap adds one point (dragging still moves the map), or use the crosshair and <b>Add point here</b>. Outside that mode, clicks never add points.</p>` },
   { title: 'Set the date range', target: panelHas('#card-time'), before: () => revealPanel('panel-controls'),
     body: `<p>Pick the period to analyse. For floods, set the <b>flood event date</b>: observations before it form the pre-event baseline, so permanent rivers and lakes are not counted as flooding.</p>` },
   { title: 'Select phenomena', target: panelHas('#card-phen'), before: () => revealPanel('panel-controls'),
-    body: `<p>Each phenomenon uses several independent NASA products. Then press <b>Analyse with NASA data</b>.</p>` },
+    body: `<p>Each phenomenon uses several independent NASA products. For vegetation disturbance you can set the <b>minimum loss per pixel</b> and an optional <b>minimum patch size</b> – analysis settings you can change afterwards without downloading again. Then press <b>Analyse with NASA data</b>.</p>` },
   { title: 'Explore the map and its layers', target: panelHas('#map-wrap'),
     body: `<p><b>Analysed</b> shows this app’s classification; <b>NASA original</b> shows NASA’s own imagery. Switch base map, add context imagery, the lat/lon grid or 3D terrain.</p>
       <p>Left-drag moves, right-drag rotates and tilts, the wheel zooms. The <b>?</b> button lists all controls.</p>` },
   { title: 'Read findings, severity and confidence', target: panelHas('#panel-results'),
     before: () => { revealPanel('panel-results'); showTab('findings'); },
-    body: `<p>Vegetation, fire and chlorophyll show an intensity level (Low → Severe).</p>
+    body: `<p>Vegetation disturbance is read from the OPERA DIST rasters: first, provisional and confirmed detections, below and above 50 % loss, with the loss magnitude. Fire and chlorophyll show an intensity level estimated from NASA imagery.</p>
       <p>Floods are reported differently: <b>newly inundated area</b>, normal water, valid coverage and a separate <b>confidence</b> rating. If the satellites did not see enough, it says <b>Insufficient data</b>.</p>` },
   { title: 'Use the event timeline', target: panelHas('#panel-timeline'), before: () => revealPanel('panel-timeline'),
     body: `<p>The <b>event track</b> shows when each event happened according to the observations: solid = observed, hatched = the window in which the start or end must lie. ▲ marks the peak; dashed flags are officially reported dates.</p>

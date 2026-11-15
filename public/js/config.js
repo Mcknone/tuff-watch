@@ -17,15 +17,20 @@ export const LEVELS = [
 // Priority decides which colour wins when two phenomena hit the same pixel.
 export const PHENOMENA = {
   vegetation: {
-    name: 'Vegetation loss / deforestation',
-    short: 'Vegetation loss',
+    // OPERA DIST detects vegetation / surface DISTURBANCE; it does not by itself prove the
+    // cause (clearing, fire, drought, harvest, flooding…), so it is not called deforestation.
+    name: 'Vegetation disturbance / loss',
+    short: 'Vegetation disturbance',
     priority: 2,
-    ramp: ['#fdbe85', '#fd8d3c', '#e6550d', '#8c1d04'],
+    categorical: true,
+    ramp: ['#fdd0a2', '#fd8d3c', '#d94801', '#7f2704'],
+    // categories drawn on the map (from VEG-DIST-STATUS): first/provisional vs confirmed × <50 % / ≥50 % cover loss
+    catNames: ['First / provisional, <50 % loss', 'First / provisional, ≥50 % loss', 'Confirmed, <50 % loss', 'Confirmed, ≥50 % loss'],
     levelHelp: [
-      'Small or first-time loss of vegetation cover',
-      'Loss repeated over several images, or radar darkening',
-      'Confirmed loss of vegetation cover',
-      'Confirmed loss of 50 % or more of the vegetation cover'
+      'Detected once or twice (not yet confirmed); vegetation-cover loss below 50 %',
+      'Detected once or twice (not yet confirmed); vegetation-cover loss of 50 % or more',
+      'Confirmed by repeated observations; vegetation-cover loss below 50 %',
+      'Confirmed by repeated observations; vegetation-cover loss of 50 % or more'
     ]
   },
   water: {
@@ -70,49 +75,38 @@ export const PHENOMENA = {
 };
 
 // ---- label rules (applied to the class names in NASA's colour maps) ----------
-const UNOBSERVED_RE = /cloud|shadow|snow|ice|no ?data|fill|not observed|unobserved|missing|hand[- ]?mask|layover|outside/i;
-
-function distLevel(label) {
-  const big = /(≥|>=|&gt;=|>)\s*50|high|large/i.test(label);
-  const small = /<\s*50|&lt;\s*50|low|small/i.test(label);
-  const confirmed = /confirm|finish|ongoing/i.test(label);
-  if (big) return confirmed ? 4 : 3;
-  if (small) return confirmed ? 2 : 1;
-  return null;                                   // fall back to colour-map order
-}
 
 // ---- surface-water products: documented categorical class codes ----------------
 // Water classes are CATEGORIES (dry / open water / partial / inundated vegetation /
-// product-flagged flood / product reference water) – not an intensity scale – and
-// any confidence wording in a label is ignored when deciding the class.
-// Class codes are read from the colour map's sourceValue; labels are a cross-check.
+// product-flagged flood / product reference water) – not an intensity scale. They are
+// decoded from the numerical WTR raster band, never from GIBS display colours.
 //
 // OPERA DSWx-HLS v1, layer WTR (OPERA DSWx-HLS product specification):
 //   0 not water · 1 open water · 2 partial surface water · 252 snow/ice ·
 //   253 cloud/cloud shadow · 254 ocean masked · 255 fill (no data)
 // OPERA DSWx-S1 v1, layer WTR (OPERA DSWx-S1 product specification):
 //   0 not water · 1 open water · 3 inundated vegetation · 250 HAND masked ·
-//   251 layover/shadow masked · 252 snow/ice · 253 cloud · 254 ocean masked · 255 fill
+//   251 layover/shadow masked · 255 fill
+// Only WTR is decoded. BWTR (binary water), CONF (confidence) and DIAG (diagnostics) are
+// different kinds of information and are never mixed into the water class.
 // MODIS/VIIRS NRT Global Flood Product MCDWD (LANCE NRT Global Flood Product user guide):
 //   0 no water · 1 surface water matching reference water · 2 recurring flood ·
 //   3 flood (unusual) · 255 insufficient data
 export const WATER_CODES = {
   dswxHls: { 0: 'dry', 1: 'open', 2: 'partial', 252: 'invalid', 253: 'invalid', 254: 'invalid', 255: 'invalid' },
-  dswxS1: { 0: 'dry', 1: 'open', 2: 'partial', 3: 'inundated_veg', 250: 'invalid', 251: 'invalid', 252: 'invalid', 253: 'invalid', 254: 'invalid', 255: 'invalid' },
+  // only the documented values are used; any other value is treated as invalid and reported
+  dswxS1: { 0: 'dry', 1: 'open', 3: 'inundated_veg', 250: 'invalid', 251: 'invalid', 255: 'invalid' },
   mcdwd: { 0: 'dry', 1: 'reference', 2: 'reference', 3: 'flood', 255: 'invalid' }
 };
 
-// Label rules, checked in order. Anything not matched is treated as INVALID (never as water).
-export const WATER_LABEL_RULES = [
-  [/no ?data|fill|not observed|unobserved|insufficient|missing|outside/i, 'invalid'],
-  [/cloud|shadow|snow|ice|layover|hand|mask|ocean|terrain/i, 'invalid'],
-  [/not[ -]water|no[ -]water|^\s*land\s*$|^\s*dry/i, 'dry'],
-  [/inundated veg|flooded veg/i, 'inundated_veg'],
-  [/partial/i, 'partial'],
-  [/recurring|reference|permanent|normal water/i, 'reference'],
-  [/unusual|flood/i, 'flood'],
-  [/water/i, 'open']
-];
+// Analysis settings for vegetation disturbance. These are user-adjustable ANALYSIS
+// settings, not a universal definition of disturbance.
+export const VEG_SENSITIVITY = {
+  minLossPct: 20,                       // minimum vegetation-cover loss per pixel (VEG-ANOM-MAX, %)
+  lossOptions: [0, 10, 15, 20, 30, 50],
+  minPatchHa: 0,                        // minimum connected patch size; 0 = keep every detected pixel
+  patchOptions: [0, 0.09, 0.5, 1, 5]    // 0.09 ha = one 30 m pixel
+};
 
 // -----------------------------------------------------------------------------
 // method:
@@ -128,19 +122,33 @@ export const DATASETS = [
   {
     id: 'dist',
     phenomenon: 'vegetation',
-    name: 'OPERA DIST-ALERT (HLS)',
-    product: 'Land Surface Disturbance Alert – vegetation cover loss',
+    name: 'OPERA DIST-ALERT-HLS',
+    product: 'Land Surface Disturbance Alert – vegetation-cover loss (VEG-DIST-STATUS + VEG-ANOM-MAX bands)',
     satellites: 'Landsat 8/9 + Sentinel-2A/B/C (Harmonized Landsat Sentinel-2)',
     kind: 'Optical',
     agency: 'NASA JPL OPERA · UMD GLAD · LP DAAC',
     resolution: '30 m',
-    gibs: 'OPERA_L3_DIST-ALERT-HLS_Color_Index',
+    gibs: 'OPERA_L3_DIST-ALERT-HLS_Color_Index',          // visualisation only
     cmr: 'OPERA_L3_DIST-ALERT-HLS_V1',
     dates: 'granules',
-    method: 'classes',
-    transparentMeans: 'none',
-    noneRe: /no (vegetation )?disturbance|no loss|undisturbed|^none$/i,
-    labelLevel: distLevel
+    method: 'dist',
+    raster: { bands: ['VEG-DIST-STATUS', 'VEG-ANOM-MAX'], expectVersion: '1' }
+  },
+  {
+    id: 'dist-s1',
+    phenomenon: 'vegetation',
+    name: 'OPERA DIST-ALERT-S1 radar',
+    product: 'Surface Disturbance Alert from Sentinel-1 radar (GEN-DIST-STATUS band) – generic surface disturbance',
+    satellites: 'Sentinel-1A/C (C-band SAR)',
+    kind: 'SAR',
+    agency: 'NASA JPL OPERA · ASF DAAC',
+    resolution: '30 m',
+    gibs: null,
+    cmr: 'OPERA_L3_DIST-ALERT-S1_V1',
+    dates: 'granules',
+    method: 'dist',
+    raster: { bands: ['GEN-DIST-STATUS'], expectVersion: '1' },
+    note: 'Radar disturbance is GENERIC surface change (not specifically vegetation). Reported separately and compared with DIST-ALERT-HLS, never added to it. Band name and class table follow the DIST-ALERT convention and are checked against each file.'
   },
   {
     id: 'rtc',
@@ -155,7 +163,9 @@ export const DATASETS = [
     cmr: 'OPERA_L2_RTC-S1_V1',
     dates: 'granules',
     method: 'sar',
-    sarThresholds: [18, 32, 50, 75]
+    indicator: true,
+    sarThresholds: [18, 32, 50, 75],
+    note: 'Brightness change of NASA’s radar visualisation – an indicator only. Not a disturbance classification and not added to the disturbance area.'
   },
   {
     id: 'nisar',
@@ -170,7 +180,9 @@ export const DATASETS = [
     cmr: 'NISAR_L2*GCOV*',
     dates: 'granules',
     method: 'sar',
-    sarThresholds: [18, 32, 50, 75]
+    indicator: true,
+    sarThresholds: [18, 32, 50, 75],
+    note: 'Brightness change of NASA’s radar visualisation – an indicator only. Not a disturbance classification and not added to the disturbance area.'
   },
   {
     id: 'dswx-s1',
@@ -186,6 +198,7 @@ export const DATASETS = [
     dates: 'granules',
     method: 'water',
     waterCodes: 'dswxS1',
+    raster: { bands: ['B01_WTR'], expectVersion: '1' },
     sensorGroup: 'sentinel-1'
   },
   {
@@ -202,6 +215,7 @@ export const DATASETS = [
     dates: 'granules',
     method: 'water',
     waterCodes: 'dswxHls',
+    raster: { bands: ['B01_WTR'], expectVersion: '1' },
     sensorGroup: 'hls'
   },
   {
@@ -218,9 +232,10 @@ export const DATASETS = [
     dates: 'daily',
     method: 'water',
     waterCodes: 'mcdwd',
+    raster: { bands: ['*.tif'], expectVersion: null },
     sensorGroup: 'modis',
     complementary: true,
-    note: 'Near-real-time product; NASA keeps only recent NRT granules, so older periods may have no data. Coarser (250 m) than OPERA – compared, never averaged.'
+    note: 'Near-real-time product; NASA keeps only recent NRT granules, so older periods may have no data. Coarser (250 m) than OPERA – compared, never averaged. File layout (single-band GeoTIFF, geographic grid) not yet verified against live files.'
   },
   {
     id: 'imerg',
@@ -292,7 +307,6 @@ export const CONTEXT_LAYERS = [
   { id: 'hls-l30', name: 'HLS Landsat true colour (30 m)', gibs: 'HLS_L30_Nadir_BRDF_Adjusted_Reflectance' }
 ];
 
-export const UNOBSERVED_LABELS = UNOBSERVED_RE;
 
 // Ready-made examples of real events.
 // `records` are officially REPORTED dates (agency reports), shown on the event track
@@ -339,8 +353,8 @@ export const EXAMPLES = [
 // Complementary sources that were evaluated for flood mapping, and why each is
 // (or is not) used. Shown in the Data sources tab.
 export const SOURCE_NOTES = [
-  { name: 'Sentinel-1 RTC backscatter', used: 'Not added for floods',
-    why: 'DSWx-S1 is computed from the same Sentinel-1 RTC acquisitions, so adding RTC would count each radar observation twice. RTC stays in use for vegetation change.' },
+  { name: 'Sentinel-1 RTC backscatter', used: 'Indicator only',
+    why: 'DSWx-S1 and DIST-ALERT-S1 are computed from the same Sentinel-1 RTC acquisitions, so adding RTC would count each radar observation twice. Raw backscatter brightness is shown only as an indicator – it is not a water or disturbance classification.' },
   { name: 'Sentinel-2 / Landsat', used: 'Already included',
     why: 'Both are the inputs of DSWx-HLS (Harmonized Landsat Sentinel-2). Cloudy pixels are excluded using the product’s own cloud classes.' },
   { name: 'MODIS Global Flood (LANCE)', used: 'Used as independent check',
@@ -350,5 +364,7 @@ export const SOURCE_NOTES = [
   { name: 'GPM IMERG rainfall', used: 'Context only',
     why: 'Shows whether heavy rain fell over the area. Rain is evidence that a flood was possible, not proof of flooded area.' },
   { name: 'NISAR', used: 'Vegetation only',
-    why: 'NISAR L-band GCOV radar is used for vegetation change. NASA has not published a NISAR water-extent product in GIBS, so it is not used to map water.' }
+    why: 'NISAR L-band GCOV backscatter is shown only as a brightness-change indicator next to the vegetation results – it is not a disturbance classification and is never added to the disturbed area. No NISAR water-extent product is used.' },
+  { name: 'OPERA DIST-ALERT-S1', used: 'Compared, not added',
+    why: 'Radar-based generic surface disturbance at 30 m. Reported next to the optical DIST-ALERT-HLS result with the overlap of their detections; the two are never summed.' }
 ];

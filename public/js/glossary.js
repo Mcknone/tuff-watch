@@ -37,10 +37,16 @@ export const TERMS = {
     'Global Imagery Browse Services: NASA’s map imagery of its science products. The app reads its pixels using NASA’s published colour tables.'],
   AOI: ['Area of interest (AOI)',
     'The area you want analysed. One point makes a circle, two points a rectangle, three or more a polygon.'],
+  DIST: ['OPERA DIST-ALERT',
+    'NASA JPL OPERA Land Surface Disturbance Alert: flags 30 m pixels where vegetation cover dropped compared with the historical baseline. Stages: first detection, provisional, confirmed. It detects disturbance, not its cause.'],
+  diststage: ['Disturbance stage',
+    'First detection: seen once. Provisional: seen again but not yet confirmed. Confirmed: seen in enough repeated observations to be confirmed. The <50 % / ≥50 % columns are the product’s own split by how much vegetation cover was lost.'],
+  sensitivity: ['Sensitivity settings',
+    'Minimum loss: a pixel flagged by DIST is counted only if its maximum vegetation-cover loss (VEG-ANOM-MAX) reaches this percentage. Minimum patch: connected groups of disturbed pixels smaller than this are not counted. Both are analysis choices – everything left out is still reported.'],
   eventconf: ['Date confidence',
     'How well the observations pin down WHEN the event happened. High: the start lies in a window of a week or less, the end was observed, and two or more sources saw it. Low: the start or end is not bounded by any observation.'],
   intensity: ['Intensity levels',
-    'For vegetation loss, fire and chlorophyll the app groups NASA’s classes into Low / Moderate / High / Severe. Floods are not given a severity – see Confidence instead.']
+    'For fire and chlorophyll (estimated from NASA imagery) the app groups NASA’s classes into Low / Moderate / High / Severe. Vegetation disturbance uses the product’s own stages instead, and floods are not given a severity – see Confidence.']
 };
 
 let tip = null, owner = null;
