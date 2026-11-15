@@ -1,4 +1,4 @@
-# 🛰️ Earth Surface Change Monitor
+# EarthScope – Surface Change Monitor
 
 **NASA Space Apps Challenge** – an interactive web app that monitors changes on Earth's surface over
 time – **deforestation, flooding, fires and algae blooms** – using **real NASA radar (SAR) and optical
@@ -7,28 +7,38 @@ satellite data**. Runs on **Cloudflare Workers**, no Google Earth Engine needed.
 ## What it does
 
 1. **Coordinates table** – type latitude/longitude (1 point = circle, 2 = rectangle, 3+ = polygon)
-   or click the map. Your area is outlined in orange and everything outside it is dimmed.
-2. **Time period + phenomena** – pick dates and any of the 4 phenomena.
+   or add points on the map (middle-click, or the **Add point** mode for touchpads and touch screens).
+   Your area is outlined in orange and everything outside it is dimmed.
+2. **Time period + phenomena** – pick dates and any of the 4 phenomena. For floods, an optional
+   **flood event date** splits observations into a pre-event baseline and later observations.
 3. **Analyse** – for every dataset the app:
    - asks **NASA CMR** (Common Metadata Repository) which real satellite acquisitions cover your area
      in that period,
    - downloads NASA's science imagery for those dates from **NASA GIBS**,
    - reads every pixel and classifies it using NASA's own colour map (class names / values),
-   - turns it into **phenomenon + intensity (Low / Moderate / High / Severe)**.
+   - turns it into **phenomenon + intensity (Low / Moderate / High / Severe)** – except floods, which
+     are reported as categorical water extent with a separate confidence rating (see below).
 4. **Results**
    - **3D globe** – a Google-Earth-style spinning globe with an atmosphere (MapLibre GL v5 globe
      projection). Switch to a **flat** map at any time, turn on a **latitude/longitude grid**
      (30° lines on the whole globe, 10° / 5° / 1° lines appear as you zoom in, equator and prime
      meridian highlighted) and optional **3D terrain** (tilt with right-drag or Ctrl+drag).
      Base map: satellite + labels, satellite, or street map. Your choices are remembered.
-   - **Map** – "Classified intensity" view (one colour family per phenomenon, darker = more intense)
-     or "NASA original colours" view.
+   - **Map** – "Analysed" view (one colour family per phenomenon, darker = more intense; for water only
+     pixels actually classified as water are drawn: newly inundated, normal water, or water with no
+     baseline, with unobserved pixels hatched) or "NASA original" view. Tick **Show pre-event
+     baseline** under the timeline to compare water before and after the event.
+   - **Map controls** – left-drag moves, right-drag rotates/tilts (no browser menu), the wheel zooms,
+     middle-click adds an AOI point. The **?** button on the map lists the controls.
    - **Interactive timeline** – a row per dataset showing every NASA acquisition (thin ticks), the
-     analysed dates (circles coloured by intensity) and failures (×). Drag the slider, click the
+     analysed dates (circles coloured by intensity), water baseline observations (squares), the
+     pre-event window, low-coverage dates (dashed) and failures (×). Drag the slider, click the
      timeline or press ▶ to play through time.
    - **Chart** – detected km² per dataset over time (dashed = radar).
    - **Findings** – per phenomenon: km² and % of area, overall severity badge, trend since the
      first date, area per intensity level, and **area confirmed by 2+ independent sensors**.
+     Floods: newly inundated km² and % of the *observable* area, normal/permanent vs new water,
+     valid coverage, confidence (with reasons), baseline dates, observation date and a per-source table.
    - **Data sources** – clear indicators for each dataset: LIVE / no acquisitions / failed, satellite,
      sensor type (SAR / Optical / Thermal / Ocean colour), agency, NASA CMR granule count with a link
      to verify the query, image coverage, method, GIBS layer ID, and links to Earthdata Search and
@@ -38,33 +48,63 @@ satellite data**. Runs on **Cloudflare Workers**, no Google Earth Engine needed.
    panels can be **dragged by their title bar to the left, right, top or bottom** of the map
    (or use the ⇆ button), resized by dragging their inner edge, and collapsed with **–**.
    The layout is saved in your browser; **Reset layout** in the top bar restores the default.
+6. **Guided tour** – **How to use EarthScope** in the top bar walks through the eight steps of an
+   analysis, highlighting the real controls. It never starts on its own. Technical terms (SAR,
+   NISAR, backscatter, change detection, baseline, coverage…) have tooltips (dotted underline).
 
 ## NASA datasets used
 
 | Phenomenon | Dataset | Satellite / sensor | Type |
 |---|---|---|---|
-| 🌳 Vegetation loss | OPERA DIST-ALERT-HLS | Landsat 8/9 + Sentinel-2 (HLS) | Optical |
-| 🌳 Vegetation loss | OPERA RTC-S1 (radar darkening) | Sentinel-1 C-band | SAR |
-| 🌳 Vegetation loss | NISAR L2 GCOV (radar darkening) | NISAR L-band (NASA–ISRO) | SAR |
-| 🌊 Surface water / floods | OPERA DSWx-S1 | Sentinel-1 C-band | SAR |
-| 🌊 Surface water / floods | OPERA DSWx-HLS | Landsat 8/9 + Sentinel-2 | Optical |
-| 🔥 Fires | VIIRS Thermal Anomalies 375 m (FIRMS) | Suomi NPP VIIRS | Thermal |
-| 🦠 Algae / chlorophyll | PACE OCI Chlorophyll-a | PACE | Ocean colour |
-| 🦠 Algae / chlorophyll | MODIS Aqua Chlorophyll-a | Aqua MODIS | Ocean colour |
+| Vegetation loss | OPERA DIST-ALERT-HLS | Landsat 8/9 + Sentinel-2 (HLS) | Optical |
+| Vegetation loss | OPERA RTC-S1 (radar darkening) | Sentinel-1 C-band | SAR |
+| Vegetation loss | NISAR L2 GCOV (radar darkening) | NISAR L-band (NASA–ISRO) | SAR |
+| Surface water / floods | OPERA DSWx-S1 | Sentinel-1 C-band | SAR |
+| Surface water / floods | OPERA DSWx-HLS | Landsat 8/9 + Sentinel-2 | Optical |
+| Surface water / floods | MODIS Global Flood, LANCE NRT (`MCDWD_L3_F2_NRT`) | Terra + Aqua MODIS | Optical (independent check) |
+| Floods – context only | GPM IMERG precipitation rate | GPM constellation | Precipitation |
+| Fires | VIIRS Thermal Anomalies 375 m (FIRMS) | Suomi NPP VIIRS | Thermal |
+| Algae / chlorophyll | PACE OCI Chlorophyll-a | PACE | Ocean colour |
+| Algae / chlorophyll | MODIS Aqua Chlorophyll-a | Aqua MODIS | Ocean colour |
+
+The Data sources tab also explains why Sentinel-1 RTC (same acquisitions as DSWx-S1 – would be
+double-counted), Sentinel-2/Landsat (already inside DSWx-HLS), VIIRS flood maps and NISAR are not
+used for flood extent.
 
 Dataset definitions (layer IDs, CMR short names, intensity rules) live in
 [`public/js/config.js`](public/js/config.js) – add a phenomenon or dataset there.
 
 ### How intensity is decided
-- **Categorical products** (DIST-ALERT, DSWx): NASA's class names are mapped to levels, e.g. DIST
-  "confirmed ≥50 % loss" → Severe; DSWx "partial surface water" → Moderate, "open water" → High,
-  water that was dry at the first date → **Severe (new flooding)**. Cloud / snow / no-data classes are
-  excluded.
+- **DIST-ALERT**: NASA's class names are mapped to levels, e.g. "confirmed ≥50 % loss" → Severe.
 - **Chlorophyll**: thresholds on NASA's mg/m³ values: 1 / 5 / 20 / 50.
 - **Radar (RTC-S1, NISAR)**: how much the radar image *darkened* compared with the first date
   (a backscatter drop, typical of forest clearing). This uses NASA's visualised radar imagery, so it is
   an indicator – for exact dB values use `extras/nisar_to_geotiff.py`.
 - **Fires**: every NASA fire-detection pixel counts.
+
+### How floods are measured (no severity scale)
+Water products are **categorical**, so they are never turned into Low/Moderate/High/Severe.
+1. **Classes** come from each product's documented class codes (read from the `sourceValue` of
+   NASA's colour map; labels are a cross-check). DSWx-HLS: 0 not water, 1 open water, 2 partial
+   surface water; DSWx-S1: 0, 1, 3 inundated vegetation; MODIS flood: 1–2 reference/recurring water,
+   3 flood. Snow/ice, cloud/cloud shadow, ocean mask, HAND mask, layover/shadow, fill and **any
+   unrecognised class are invalid** – never water. Confidence words in a label never change the class.
+2. **Colour matching is strict.** GIBS resamples imagery, so a blend of "not water" white and "open
+   water" blue can look like "partial water". Blended colours are excluded as unclassified.
+3. **No data is not dry and not wet.** Transparent pixels are invalid unless NASA draws "not water"
+   as transparent *and* the catalogue lists an acquisition on that date.
+4. **Baseline**: observations before the flood event date (or, without one, up to the first
+   observation covering ≥ 30 % of the area). Water there = normal/permanent water.
+5. **Newly inundated** = valid water now that was validly dry in the baseline (or that the MODIS
+   product itself flags as unusual flood). Water whose baseline is unknown is shown separately and
+   not counted as new. Percentages are of the **valid observed** area; valid coverage is reported.
+6. **Sensors are not averaged.** The headline uses the source with the best valid coverage; other
+   sources are compared pixel by pixel to compute agreement.
+7. **Confidence** (separate from the amount of water): *Insufficient data* if < 25 % of the area was
+   observed or the baseline is unknown for most pixels; *High* needs ≥ 70 % coverage, ≥ 70 % known
+   baseline and ≥ 80 % agreement with a second independent sensor; *Medium* ≥ 50 % / ≥ 50 %; else
+   *Low*. Disagreement between sensors lowers it one step.
+8. **Rainfall (GPM IMERG)** is context only and never counted as flooded area.
 
 ## Deploy: GitHub → Cloudflare
 
@@ -95,6 +135,8 @@ public/js/nasa.js       calls to /api (CMR, GIBS images, colour maps)
 public/js/app.js        globe/map, coordinate table, timeline, chart, findings, data-source indicators
 public/js/graticule.js  latitude/longitude grid lines + labels
 public/js/layout.js     draggable / resizable / collapsible panels
+public/js/tour.js       guided tour ("How to use EarthScope")
+public/js/glossary.js   plain-language tooltips for technical terms
 tests/                  unit tests + headless-browser end-to-end test
 extras/                 Google Earth Engine version + NISAR GCOV → GeoTIFF converter
 ```
@@ -106,8 +148,12 @@ extras/                 Google Earth Engine version + NISAR GCOV → GeoTIFF con
   NISAR) see through clouds – that's why both are combined.
 - NISAR coverage depends on NASA's release schedule; the app reports "no acquisitions" honestly when
   NASA has none for the area/period.
-- If NASA has no colour map for a layer, any coloured pixel counts as "detected" and the Data sources
-  panel says so.
+- If NASA has no colour map for a vegetation/fire/chlorophyll layer, any coloured pixel counts as
+  "detected" and the Data sources panel says so. Water and rainfall layers without a colour map are
+  **not used** (their classes cannot be read safely).
+- The MODIS flood product is near-real-time; NASA keeps only recent NRT granules, so older periods may
+  show "no data". The IMERG layer is read as a 30-minute snapshot per sampled day – sparse context, not
+  a rainfall total.
 
 Data: NASA GIBS, NASA CMR / Earthdata, OPERA (JPL), NISAR (NASA–ISRO), LP DAAC, PO.DAAC, ASF DAAC,
 OB.DAAC, LANCE/FIRMS. Base maps © OpenStreetMap contributors, Esri.
