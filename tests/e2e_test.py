@@ -17,7 +17,9 @@ window.maplibregl = (function(){
     on(e,f){ (this.h[e]=this.h[e]||[]).push(f); } addControl(){} fitBounds(b){ this.fit=b; }
     addSource(id,o){ if(this.s[id]) throw new Error('dup source '+id); this.s[id]=new Src(o);} getSource(id){return this.s[id];}
     removeSource(id){ delete this.s[id]; } addLayer(l,before){ if(this.l[l.id]) throw new Error('dup layer '+l.id); if(before && !this.l[before]) throw new Error('missing before '+before); this.l[l.id]=l; }
-    getLayer(id){return this.l[id];} removeLayer(id){ delete this.l[id]; } setLayoutProperty(){} }
+    getLayer(id){return this.l[id];} removeLayer(id){ delete this.l[id]; } setLayoutProperty(){}
+    setProjection(p){ this.proj=p; } setTerrain(t){ this.terrain=t; } getPitch(){ return 0; } getZoom(){ return 2; }
+    easeTo(){} resize(){} }
   return { Map, NavigationControl: class{}, ScaleControl: class{} };
 })();"""
 CHART_STUB = """window.Chart = class { constructor(el,cfg){ this.cfg=cfg; window.__chart=this; this.scales={x:{getPixelForValue:()=>0,getValueForPixel:()=>0}}; } update(){} destroy(){} };"""

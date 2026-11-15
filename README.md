@@ -16,6 +16,11 @@ satellite data**. Runs on **Cloudflare Workers**, no Google Earth Engine needed.
    - reads every pixel and classifies it using NASA's own colour map (class names / values),
    - turns it into **phenomenon + intensity (Low / Moderate / High / Severe)**.
 4. **Results**
+   - **3D globe** – a Google-Earth-style spinning globe with an atmosphere (MapLibre GL v5 globe
+     projection). Switch to a **flat** map at any time, turn on a **latitude/longitude grid**
+     (30° lines on the whole globe, 10° / 5° / 1° lines appear as you zoom in, equator and prime
+     meridian highlighted) and optional **3D terrain** (tilt with right-drag or Ctrl+drag).
+     Base map: satellite + labels, satellite, or street map. Your choices are remembered.
    - **Map** – "Classified intensity" view (one colour family per phenomenon, darker = more intense)
      or "NASA original colours" view.
    - **Interactive timeline** – a row per dataset showing every NASA acquisition (thin ticks), the
@@ -29,6 +34,10 @@ satellite data**. Runs on **Cloudflare Workers**, no Google Earth Engine needed.
      to verify the query, image coverage, method, GIBS layer ID, and links to Earthdata Search and
      NASA Worldview.
    - **Export** – CSV and JSON of every number.
+5. **Movable panels** – the map fills the window; the *Analysis setup*, *Results* and *Timeline*
+   panels can be **dragged by their title bar to the left, right, top or bottom** of the map
+   (or use the ⇆ button), resized by dragging their inner edge, and collapsed with **–**.
+   The layout is saved in your browser; **Reset layout** in the top bar restores the default.
 
 ## NASA datasets used
 
@@ -83,7 +92,9 @@ public/css/style.css
 public/js/config.js     phenomena, intensity colours, NASA datasets, examples
 public/js/classify.js   pixel classification, radar darkening, area statistics (pure, unit-tested)
 public/js/nasa.js       calls to /api (CMR, GIBS images, colour maps)
-public/js/app.js        map, coordinate table, timeline, chart, findings, data-source indicators
+public/js/app.js        globe/map, coordinate table, timeline, chart, findings, data-source indicators
+public/js/graticule.js  latitude/longitude grid lines + labels
+public/js/layout.js     draggable / resizable / collapsible panels
 tests/                  unit tests + headless-browser end-to-end test
 extras/                 Google Earth Engine version + NISAR GCOV → GeoTIFF converter
 ```
