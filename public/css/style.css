@@ -288,7 +288,9 @@ kbd { font-family: var(--mono); font-size: 10.5px; border: 1px solid var(--line-
 .sw.hatch { background: repeating-linear-gradient(45deg, #8088925a 0 2px, transparent 2px 5px); border: 1px solid #c0c6ce; }
 
 /* ------------------------------------------------------------- timeline */
-.timeline { display: grid; grid-template-rows: auto minmax(0, 1fr); padding: 0; overflow: hidden; }
+.timeline { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.timeline > .tl-controls, .timeline > .outdated-banner { flex: none; }
+.timeline > .tl-body { flex: 1 1 auto; }
 .tl-controls { display: flex; align-items: center; gap: 12px; padding: 6px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 #play { width: 30px; height: 26px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); cursor: pointer; font-size: 11px; }
 #play:disabled { color: var(--faint); cursor: default; }
@@ -503,3 +505,37 @@ kbd { font-family: var(--mono); font-size: 10.5px; border: 1px solid var(--line-
   border-radius: var(--radius); padding: 6px 6px 6px 10px; box-shadow: 0 4px 14px rgba(0,0,0,.2); font-size: 12px; white-space: nowrap;
 }
 @media (max-width: 520px) { .pick-bar span { display: none; } }
+
+/* ------------------------------------------------------------- reliability states */
+.v-err { color: var(--bad); background: #fdf1ef; border-color: #f0c2bc; }
+.outdated-banner { font-size: 12px; padding: 7px 10px; margin: 0 0 10px; background: #fff7e8; border-left: 3px solid var(--warn); color: #5a3a05; }
+.timeline > .outdated-banner { margin: 0; }
+body.results-outdated #findings > :not(.outdated-banner),
+body.results-outdated #sources > :not(.outdated-banner),
+body.results-outdated .tl-body { opacity: .45; filter: grayscale(.6); }
+.lg-warn { color: var(--warn) !important; font-weight: 600; }
+.f-why { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
+.f-why li { margin: 2px 0; }
+.f-head h3 small.est { font-weight: 400; font-size: 11px; color: var(--faint); margin-left: 4px; }
+.dist-table th { font-weight: 500; color: var(--faint); font-size: 11px; text-align: left; padding: 3px 4px; }
+.dist-table td small { display: block; color: var(--faint); font-size: 10.5px; font-weight: 400; }
+.f-cats { margin: 6px 0 8px; font-size: 11px; }
+.why.ind { display: block; margin: 8px 0 0; }
+.why.ind ul { font-size: 11.5px; }
+
+/* vegetation sensitivity settings */
+.sens { border: 0; border-top: 1px solid var(--line); margin: 10px 0 0; padding: 10px 0 0; display: grid; gap: 6px; }
+.sens legend { font-size: 12px; font-weight: 600; padding: 0; display: flex; align-items: center; gap: 6px; }
+.sens legend .term { border: 0; color: var(--faint); }
+.sens label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+.sens .hint { margin: 2px 0 0; font-size: 11px; }
+
+/* diagnostics */
+.diag { margin: 8px 0 4px; font-size: 11.5px; }
+.diag summary { cursor: pointer; color: var(--accent); }
+.dg { margin-top: 6px; }
+.dg td small { display: block; color: var(--faint); }
+.dg tr.dg-sub td { background: var(--subtle); color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--line); }
+.dg-g code { font-size: 10px; }
+.dg-h { margin-top: 3px; font-family: var(--mono); font-size: 10.5px; }
+.map-wrap.picking .maplibregl-canvas-container canvas { cursor: crosshair; }

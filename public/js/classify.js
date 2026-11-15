@@ -207,15 +207,6 @@ export function sarLevels(lumRef, lumCur, thresholds) {
   return out;
 }
 
-/** Water: pixels that are water now but were dry at the first date → Severe. */
-export function markNewWater(levelsRef, levelsCur) {
-  const out = levelsCur.slice();
-  for (let p = 0; p < out.length; p++) {
-    if (out[p] >= 2 && out[p] <= 3 && levelsRef[p] === 0) out[p] = 4;
-  }
-  return out;
-}
-
 // ---------------------------------------------------------------------- stats
 /** Area per level for one classified frame. */
 export function frameStats(levels, grid) {
@@ -265,12 +256,12 @@ export function combine(levelArrays, grid) {
   return { merged, agreeKm2 };
 }
 
-/** Overall severity badge for a phenomenon: highest level covering ≥0.5 % of area or ≥0.25 km². */
-export function overallLevel(stats, aoiKm2) {
-  for (let lv = 4; lv >= 1; lv--) {
-    const a = stats.km2[lv];
-    if (a >= 0.25 || (aoiKm2 && a / aoiKm2 >= 0.005)) return lv;
-  }
+/**
+ * Highest intensity level present in the area (any detected area counts – there is no
+ * hidden minimum-area rule; the area of each level is always shown next to the badge).
+ */
+export function overallLevel(stats) {
+  for (let lv = 4; lv >= 1; lv--) if (stats.km2[lv] > 0) return lv;
   return 0;
 }
 
@@ -311,94 +302,42 @@ export const W_NAMES = ['not water', 'open water', 'partial surface water', 'inu
 
 export const isWaterClass = c => c >= W.OPEN && c <= W.REFERENCE;
 
-/** Integer class code from a colour-map value such as "[1]" or "1". */
-function classCode(v) {
-  const m = String(v || '').trim().match(/^\[?\s*(-?\d+)\s*\]?$/);
-  return m ? parseInt(m[1], 10) : null;
-}
-
 /**
- * Map a product's colour map to water classes.
- * codes: documented {classValue: name}; rules: [[regex, name], …] for labels.
- * Unknown classes become OUT – they are never guessed to be water.
+ * Which observations form the pre-event baseline: with an event date, every valid
+ * observation STRICTLY before it (never one made on or after the event began); without
+ * one, the earliest observations up to the first that sees ≥ 30 % of the area – an
+ * assumption the app reports.
  */
-export function buildWaterClassifier(colormap, codes, rules) {
-  const lookup = new Map(), info = [], palette = [];
-  let transparentClass = OUT, transparentIsDry = false;
-  for (const e of (colormap ? colormap.entries : [])) {
-    const code = classCode(e.value);
-    const byCode = code !== null && codes && code in codes ? codes[code] : null;
-    const rule = rules.find(([re]) => re.test(e.label || ''));
-    const byLabel = rule ? rule[1] : null;
-    // value is authoritative; a label that says "invalid" (cloud, mask…) always wins
-    let name = byCode || byLabel || 'invalid';
-    if (byLabel === 'invalid') name = 'invalid';
-    if (e.nodata) name = 'invalid';
-    const cls = W_BY_NAME[name];
-    info.push({ label: e.label || e.value, value: e.value, rgb: e.rgb, cls, name, transparent: e.transparent,
-      mismatch: !!(byCode && byLabel && byCode !== byLabel) });
-    if (e.transparent) {
-      // Some visualisations draw "not water" as transparent; then empty pixels are dry,
-      // but only where an acquisition exists (checked by the caller).
-      if (cls === W.DRY) { transparentClass = W.DRY; transparentIsDry = true; }
-      continue;
-    }
-    lookup.set(key(e.r, e.g, e.b), cls);
-    palette.push({ r: e.r, g: e.g, b: e.b, cls });
-  }
-  return { lookup, info, palette, transparentClass, transparentIsDry, valid: info.some(i => i.cls !== OUT) };
+export function baselineFrames(frames, eventDate, minCoverage = 0.3) {
+  if (eventDate) return frames.filter(f => f.date < eventDate);
+  const k = frames.findIndex(f => (f.coverage ?? 0) >= minCoverage);
+  return k >= 0 ? frames.slice(0, k + 1) : [];
 }
 
 /**
- * Strict colour lookup. GIBS resamples imagery, so edge pixels can be a blend of two
- * class colours (e.g. "not water" + "open water" ≈ "partial water"). A blended colour is
- * NOT re-labelled as the nearest class: anything that is not within a small tolerance of
- * exactly one class colour is treated as unclassified (excluded).
- */
-export function matchWaterColour(clf, r, g, b, tol = 12) {
-  const exact = clf.lookup.get(key(r, g, b));
-  if (exact !== undefined) return exact;
-  let best = null, bestD = Infinity, second = Infinity;
-  for (const e of clf.palette) {
-    const d = Math.max(Math.abs(e.r - r), Math.abs(e.g - g), Math.abs(e.b - b));
-    if (d < bestD) { second = bestD; bestD = d; best = e; } else if (d < second) second = d;
-  }
-  if (!best || bestD > tol || second <= bestD + 4) return UNCLASSIFIED;
-  return best.cls;
-}
-
-/** Classify a water image. `acquired`: an acquisition exists for this date (from CMR). */
-export function classifyWater(rgba, grid, clf, acquired = true) {
-  const { w, h, mask } = grid;
-  const out = new Uint8Array(w * h).fill(OUT);
-  const cache = new Map();
-  for (let p = 0; p < w * h; p++) {
-    if (!mask[p]) continue;
-    if (rgba[p * 4 + 3] < 128) {                 // empty / semi-transparent edge
-      out[p] = clf.transparentIsDry && acquired && rgba[p * 4 + 3] < 16 ? W.DRY : OUT;
-      continue;
-    }
-    const k = key(rgba[p * 4], rgba[p * 4 + 1], rgba[p * 4 + 2]);
-    let c = cache.get(k);
-    if (c === undefined) { c = matchWaterColour(clf, rgba[p * 4], rgba[p * 4 + 1], rgba[p * 4 + 2]); cache.set(k, c); }
-    out[p] = c;
-  }
-  return out;
-}
-
-/**
- * Pre-event baseline from one or more classified observations.
- * Per pixel: 1 = water was seen, 0 = valid and always dry, 255 = never validly observed.
+ * Pre-event baseline from several classified observations (multi-observation baseline).
+ * Per pixel, among the VALID baseline observations:
+ *   1 = water in at least half of them (permanent / normal water)
+ *   2 = water in some but fewer than half (occasional / seasonal water – still not "new")
+ *   0 = valid in at least one and never water
+ *   255 = never validly observed
+ * A single noisy observation therefore cannot turn a pixel into permanent water, and a
+ * product-flagged flood class never enters the baseline as normal water.
  */
 export function waterBaseline(classArrays, n) {
-  const base = new Uint8Array(n).fill(OUT);
+  const water = new Uint16Array(n), valid = new Uint16Array(n);
   for (const arr of classArrays) {
     for (let p = 0; p < n; p++) {
       const c = arr[p];
       if (c === OUT || c === UNCLASSIFIED) continue;
-      if (isWaterClass(c) && c !== W.FLOOD) base[p] = 1;
-      else if (base[p] === OUT) base[p] = 0;
+      valid[p]++;
+      if (isWaterClass(c) && c !== W.FLOOD) water[p]++;
     }
+  }
+  const base = new Uint8Array(n).fill(OUT);
+  for (let p = 0; p < n; p++) {
+    if (!valid[p]) continue;
+    base[p] = water[p] === 0 ? 0 : 2 * water[p] >= valid[p] ? 1 : 2;
   }
   return base;
 }
@@ -418,7 +357,7 @@ export function waterStatus(classes, baseline) {
     if (c === W.FLOOD) { out[p] = 2; continue; }
     if (c === W.REFERENCE) { out[p] = 1; continue; }
     const b = baseline ? baseline[p] : OUT;
-    out[p] = b === 1 ? 1 : b === 0 ? 2 : 3;
+    out[p] = b === 1 || b === 2 ? 1 : b === 0 ? 2 : 3;
   }
   return out;
 }
@@ -458,10 +397,18 @@ export function waterStats(classes, status, grid) {
 }
 
 /**
+ * "New water detected" needs new water covering at least 0.5 % of the OBSERVED area or
+ * 0.05 km² – a stated noise floor (a handful of pixels never makes an area "flooded").
+ * Smaller amounts are still reported as numbers; this only decides the wording.
+ */
+export const FLOOD_SIGNAL = { pctOfObserved: 0.5, km2: 0.05 };
+export const floodSignal = st => st.newKm2 > 0 && st.newKm2 >= Math.max(FLOOD_SIGNAL.km2, (FLOOD_SIGNAL.pctOfObserved / 100) * st.validKm2);
+
+/**
  * Agreement of two independent sensors on "newly inundated or not", over pixels that
  * both observed validly and whose baseline is known in both.
  */
-export function waterAgreement(statusA, statusB, grid) {
+export function waterAgreement(statusA, statusB, grid, clsA = null, clsB = null) {
   let common = 0, agree = 0, bothNew = 0, eitherNew = 0;
   for (let j = 0; j < grid.h; j++) {
     const a = grid.rowArea[j];
@@ -470,6 +417,8 @@ export function waterAgreement(statusA, statusB, grid) {
       if (!grid.mask[p]) continue;
       const x = statusA[p], y = statusB[p];
       if (x === OUT || y === OUT || x === 3 || y === 3) continue;
+      // inundated vegetation is only observable by radar – an optical "dry" there is not a disagreement
+      if ((clsA && clsA[p] === W.INUNDATED_VEG) || (clsB && clsB[p] === W.INUNDATED_VEG)) continue;
       common += a;
       const nx = x === 2, ny = y === 2;
       if (nx === ny) agree += a;

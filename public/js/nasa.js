@@ -79,3 +79,55 @@ export function worldviewUrl(layer, date, bbox) {
   const v = bbox.map(x => x.toFixed(4)).join(',');
   return `https://worldview.earthdata.nasa.gov/?v=${v}&l=${encodeURIComponent(layer)}&t=${date || ''}`;
 }
+
+// ---------------------------------------------------------------- numerical rasters
+/** A failed data request. kind: retrieval | auth | auth-config | timeout | malformed | missing-band | processing */
+export class DataError extends Error {
+  constructor(message, kind = 'retrieval') { super(message); this.kind = kind; }
+}
+
+/** CMR granules over the area with download links for the requested bands. */
+export async function fetchGranules(shortName, bbox, start, end, bands) {
+  const q = new URLSearchParams({ short_name: shortName, bbox: bbox.map(v => v.toFixed(5)).join(','), start, end, bands: bands.join(',') });
+  let res;
+  try { res = await fetch(`/api/cmr/granules?${q}`); }
+  catch (e) { throw new DataError(`NASA catalogue (CMR) unreachable: ${e.message}`, 'retrieval'); }
+  if (!res.ok) throw new DataError(`NASA catalogue (CMR) search failed: ${await errorText(res)}`, 'retrieval');
+  return res.json();
+}
+
+export const dataUrl = url => `/api/data?url=${encodeURIComponent(url)}`;
+
+/** Reject after ms with a timeout DataError. */
+export function withTimeout(promise, ms, what) {
+  let t;
+  return Promise.race([
+    promise.finally(() => clearTimeout(t)),
+    new Promise((_, reject) => { t = setTimeout(() => reject(new DataError(`${what} timed out after ${ms / 1000} s`, 'timeout')), ms); })
+  ]);
+}
+
+/**
+ * Open a NASA GeoTIFF through the server relay (HTTP range requests). A first small
+ * range read surfaces authentication / HTTP errors as DataError instead of a broken parse.
+ */
+export async function openRemoteTiff(url) {
+  let probe;
+  try { probe = await withTimeout(fetch(dataUrl(url), { headers: { Range: 'bytes=0-1023' } }), 45000, 'NASA data request'); }
+  catch (e) { if (e instanceof DataError) throw e; throw new DataError(`NASA data request failed: ${e.message}`, 'retrieval'); }
+  if (!probe.ok) {
+    let body = {};
+    try { body = await probe.json(); } catch { /* not JSON */ }
+    throw new DataError(body.error || `NASA data request HTTP ${probe.status}`, body.kind || 'retrieval');
+  }
+  const head = new Uint8Array(await probe.arrayBuffer());
+  const magic = head.length >= 4 && ((head[0] === 0x49 && head[1] === 0x49) || (head[0] === 0x4d && head[1] === 0x4d));
+  if (!magic) throw new DataError('the file returned by NASA is not a GeoTIFF', 'malformed');
+  if (typeof GeoTIFF === 'undefined') throw new DataError('GeoTIFF reader library not loaded', 'processing');
+  try {
+    return await withTimeout(GeoTIFF.fromUrl(dataUrl(url), { allowFullFile: false, cacheSize: 200 }), 45000, 'Opening the GeoTIFF');
+  } catch (e) {
+    if (e instanceof DataError) throw e;
+    throw new DataError(`could not read the GeoTIFF: ${e.message}`, 'malformed');
+  }
+}

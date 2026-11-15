@@ -15,11 +15,14 @@ satellite data**. Runs on **Cloudflare Workers**, no Google Earth Engine needed.
    **flood event date** splits observations into a pre-event baseline and later observations.
 3. **Analyse** – for every dataset the app:
    - asks **NASA CMR** (Common Metadata Repository) which real satellite acquisitions cover your area
-     in that period,
-   - downloads NASA's science imagery for those dates from **NASA GIBS**,
-   - reads every pixel and classifies it using NASA's own colour map (class names / values),
-   - turns it into **phenomenon + intensity (Low / Moderate / High / Severe)** – except floods, which
-     are reported as categorical water extent with a separate confidence rating (see below).
+     in that period (all result pages, with the collection version),
+   - **vegetation disturbance and water**: reads the products' own **GeoTIFF rasters** (OPERA
+     DIST-ALERT `VEG-DIST-STATUS` + `VEG-ANOM-MAX`, DSWx `B01_WTR`) through the server relay, decodes
+     the documented numerical class values on a 30 m UTM grid (nearest neighbour, overlapping granules
+     never counted twice) and reports valid / invalid / missing pixels for every acquisition,
+   - **fire, chlorophyll, rainfall and radar-brightness indicators**: estimated from NASA **GIBS**
+     imagery and NASA's colour maps (labelled as estimates in the app),
+   - GIBS imagery is otherwise used for display only (“NASA original” view).
 4. **Results**
    - **3D globe** – a Google-Earth-style spinning globe with an atmosphere (MapLibre GL v5 globe
      projection). Switch to a **flat** map at any time, turn on a **latitude/longitude grid**
@@ -61,12 +64,13 @@ satellite data**. Runs on **Cloudflare Workers**, no Google Earth Engine needed.
 
 | Phenomenon | Dataset | Satellite / sensor | Type |
 |---|---|---|---|
-| Vegetation loss | OPERA DIST-ALERT-HLS | Landsat 8/9 + Sentinel-2 (HLS) | Optical |
-| Vegetation loss | OPERA RTC-S1 (radar darkening) | Sentinel-1 C-band | SAR |
-| Vegetation loss | NISAR L2 GCOV (radar darkening) | NISAR L-band (NASA–ISRO) | SAR |
-| Surface water / floods | OPERA DSWx-S1 | Sentinel-1 C-band | SAR |
-| Surface water / floods | OPERA DSWx-HLS | Landsat 8/9 + Sentinel-2 | Optical |
-| Surface water / floods | MODIS Global Flood, LANCE NRT (`MCDWD_L3_F2_NRT`) | Terra + Aqua MODIS | Optical (independent check) |
+| Vegetation disturbance | OPERA DIST-ALERT-HLS – `VEG-DIST-STATUS`, `VEG-ANOM-MAX` rasters | Landsat 8/9 + Sentinel-2 (HLS) | Optical |
+| Vegetation disturbance (compared) | OPERA DIST-ALERT-S1 – `GEN-DIST-STATUS` raster | Sentinel-1 C-band | SAR |
+| Indicator only | OPERA RTC-S1 (radar brightness change, GIBS) | Sentinel-1 C-band | SAR |
+| Indicator only | NISAR L2 GCOV (radar brightness change, GIBS) | NISAR L-band (NASA–ISRO) | SAR |
+| Surface water / floods | OPERA DSWx-S1 – `B01_WTR` raster | Sentinel-1 C-band | SAR |
+| Surface water / floods | OPERA DSWx-HLS – `B01_WTR` raster | Landsat 8/9 + Sentinel-2 | Optical |
+| Surface water / floods | MODIS Global Flood, LANCE NRT (`MCDWD_L3_F2_NRT`) raster | Terra + Aqua MODIS | Optical (independent check) |
 | Floods – context only | GPM IMERG precipitation rate | GPM constellation | Precipitation |
 | Fires | VIIRS Thermal Anomalies 375 m (FIRMS) | Suomi NPP VIIRS | Thermal |
 | Algae / chlorophyll | PACE OCI Chlorophyll-a | PACE | Ocean colour |
@@ -79,13 +83,32 @@ used for flood extent.
 Dataset definitions (layer IDs, CMR short names, intensity rules) live in
 [`public/js/config.js`](public/js/config.js) – add a phenomenon or dataset there.
 
-### How intensity is decided
-- **DIST-ALERT**: NASA's class names are mapped to levels, e.g. "confirmed ≥50 % loss" → Severe.
+### How vegetation disturbance is measured
+OPERA DIST detects vegetation **disturbance**; it does not establish the cause, so the app says
+“vegetation disturbance / loss”, not deforestation.
+- `VEG-DIST-STATUS` (DIST-ALERT-HLS v1) is decoded numerically: 0 no disturbance · 1/2/3 first /
+  provisional / confirmed with **< 50 %** cover loss · 4/5/6 the same with **≥ 50 %** · 7/8 confirmed and
+  finished · 255 no data. **All** first, provisional and confirmed classes, including the < 50 %
+  ones, are detections. No data is invalid, never “no disturbance”.
+- `VEG-ANOM-MAX` (0–100 % maximum vegetation-cover loss; 255 = no data) gives the loss magnitude.
+- Two separate, user-adjustable **analysis settings** (not universal definitions):
+  *minimum loss per pixel* (default 20 %, applied to `VEG-ANOM-MAX`; options 0–50 %) and *minimum patch
+  size* (default **none** – every pixel counts; options 0.09–5 ha). Changing them re-evaluates the
+  downloaded rasters instantly. Everything they leave out is still reported (“flagged by DIST but
+  below the loss setting”, “in patches smaller than…”, “loss anomaly without a DIST alert”).
+- Results show confirmed / provisional / first-detection area separately for < 50 % and ≥ 50 % loss,
+  mean and maximum loss, patch count, valid / masked / missing coverage, observation date and source.
+- DIST-ALERT-S1 (radar, generic surface disturbance) is reported next to it with the overlap of their
+  detections – never added. RTC-S1 and NISAR brightness changes are shown only as indicators.
+- Analysis is on the native 30 m grid; very large areas (> 4 million cells) are sampled every 60 m,
+  90 m… with nearest neighbour, and the app says so.
+
+### How intensity is decided (imagery-based estimates)
 - **Chlorophyll**: thresholds on NASA's mg/m³ values: 1 / 5 / 20 / 50.
-- **Radar (RTC-S1, NISAR)**: how much the radar image *darkened* compared with the first date
-  (a backscatter drop, typical of forest clearing). This uses NASA's visualised radar imagery, so it is
-  an indicator – for exact dB values use `extras/nisar_to_geotiff.py`.
 - **Fires**: every NASA fire-detection pixel counts.
+- **Radar indicators (RTC-S1, NISAR)**: how much NASA's radar visualisation *darkened* compared with
+  the first date – an indicator, not calibrated dB (for exact values use `extras/nisar_to_geotiff.py`).
+- The badge shows the highest level **present** (any area); the area of every level is listed.
 
 ### Event timeline (how event dates are estimated)
 Events are built only from the analysed observations, one per phenomenon
@@ -116,22 +139,28 @@ Events are built only from the analysed observations, one per phenomenon
 
 ### How floods are measured (no severity scale)
 Water products are **categorical**, so they are never turned into Low/Moderate/High/Severe.
-1. **Classes** come from each product's documented class codes (read from the `sourceValue` of
-   NASA's colour map; labels are a cross-check). DSWx-HLS: 0 not water, 1 open water, 2 partial
-   surface water; DSWx-S1: 0, 1, 3 inundated vegetation; MODIS flood: 1–2 reference/recurring water,
-   3 flood. Snow/ice, cloud/cloud shadow, ocean mask, HAND mask, layover/shadow, fill and **any
-   unrecognised class are invalid** – never water. Confidence words in a label never change the class.
-2. **Colour matching is strict.** GIBS resamples imagery, so a blend of "not water" white and "open
-   water" blue can look like "partial water". Blended colours are excluded as unclassified.
-3. **No data is not dry and not wet.** Transparent pixels are invalid unless NASA draws "not water"
-   as transparent *and* the catalogue lists an acquisition on that date.
-4. **Baseline**: observations before the flood event date (or, without one, up to the first
-   observation covering ≥ 30 % of the area). Water there = normal/permanent water.
+1. **Classes** are decoded from the numerical **WTR** band of each file (never from map colours):
+   DSWx-HLS 0 not water · 1 open water · 2 partial surface water · 252 snow/ice · 253 cloud/shadow ·
+   254 ocean masked · 255 no data; DSWx-S1 0 not water · 1 open water · 3 inundated vegetation ·
+   250 HAND masked · 251 layover/shadow masked · 255 fill; MODIS flood 1–2 reference/recurring water,
+   3 flood. Masked, fill and **any undocumented value are invalid** – never water – and are counted in
+   the diagnostics. BWTR, CONF and DIAG are separate kinds of information and are not mixed in.
+2. **Nearest-neighbour sampling** on a 30 m UTM grid aligned with the OPERA tiles: categorical
+   values are never interpolated; overlapping granules are never counted twice.
+3. **No data is not dry and not wet.** Areas with no file or no valid pixel are reported as missing
+   or invalid coverage, and a failed download is a **data retrieval error**, never “no flood”.
+4. **Baseline**: all valid observations strictly **before** the flood event date, combined per pixel
+   by majority (water in ≥ half of them = permanent, in some = occasional, never = dry). Without an
+   event date the earliest observations are *assumed* pre-event – the app says so and caps confidence
+   at Medium.
 5. **Newly inundated** = valid water now that was validly dry in the baseline (or that the MODIS
    product itself flags as unusual flood). Water whose baseline is unknown is shown separately and
-   not counted as new. Percentages are of the **valid observed** area; valid coverage is reported.
+   not counted as new. Percentages are of the **valid observed** area; valid, masked and missing
+   coverage are reported separately. “New water detected” needs ≥ 0.5 % of the observed area or
+   ≥ 0.05 km² (a stated noise floor); smaller amounts are still reported as numbers.
 6. **Sensors are not averaged.** The headline uses the source with the best valid coverage; other
-   sources are compared pixel by pixel to compute agreement.
+   sources observed within 3 days are compared pixel by pixel to compute agreement (inundated
+   vegetation, which only radar can see, is excluded from that comparison).
 7. **Confidence** (separate from the amount of water): *Insufficient data* if < 25 % of the area was
    observed or the baseline is unknown for most pixels; *High* needs ≥ 70 % coverage, ≥ 70 % known
    baseline and ≥ 80 % agreement with a second independent sensor; *Medium* ≥ 50 % / ≥ 50 %; else
@@ -146,24 +175,39 @@ Water products are **categorical**, so they are never turned into Low/Moderate/H
    The Worker name must match `name` in `wrangler.jsonc` (`earth-surface-monitor`).
 4. Deploy. Every push to the main branch redeploys automatically.
 
-No secrets are needed: NASA GIBS and CMR are public services.
+**NASA Earthdata token (required for vegetation-disturbance and flood numbers).** The OPERA and
+LANCE GeoTIFFs are Earthdata-protected. Create a token at urs.earthdata.nasa.gov (profile → Generate
+Token) and store it as a Worker secret – it stays on the server, is sent only to NASA / DAAC hosts and
+never to CDN redirects:
+```bash
+npx wrangler secret put EARTHDATA_TOKEN
+```
+Without it the app shows “Earthdata access not configured” for those datasets (a data error, not a
+result). GIBS and CMR need no token.
 
 ### Run locally
 ```bash
 npm install
 npm run dev          # http://localhost:8787
-npm test             # unit tests (classification + worker)
+npm test             # unit tests: classification, raster decoding (GeoTIFF fixtures), geometry,
+                     # gestures, events, worker
+npm run test:e2e     # headless-browser end-to-end test (needs Python Playwright + Pillow)
+EARTHDATA_TOKEN=… npm run test:integration   # live NASA data: July 2025 Central Texas flood
 ```
 
 ## Project structure
 ```
 wrangler.jsonc          Cloudflare config (Worker + static assets)
-src/worker.js           Worker: serves the app, relays + caches NASA GIBS/CMR (allow-listed, not an open proxy)
+src/worker.js           Worker: serves the app, relays + caches NASA GIBS/CMR, authenticated Earthdata
+                        GeoTIFF relay (allow-listed, not an open proxy)
 public/index.html       the app page
 public/css/style.css
 public/js/config.js     phenomena, intensity colours, NASA datasets, examples
-public/js/classify.js   pixel classification, radar darkening, area statistics (pure, unit-tested)
-public/js/nasa.js       calls to /api (CMR, GIBS images, colour maps)
+public/js/classify.js   water baseline / statistics / confidence, imagery classification (pure, tested)
+public/js/raster.js     GeoTIFF window reading, nearest-neighbour sampling, DIST / WTR decoding (tested)
+public/js/geo.js        UTM projection, metric circles, polygon checks, 30 m analysis grid (tested)
+public/js/pointer.js    click / drag / multi-touch gesture classification (tested)
+public/js/nasa.js       calls to /api (CMR, GIBS images, colour maps, remote GeoTIFFs, typed data errors)
 public/js/app.js        globe/map, coordinate table, timeline, chart, findings, data-source indicators
 public/js/graticule.js  latitude/longitude grid lines + labels
 public/js/layout.js     draggable / resizable / collapsible panels
@@ -175,8 +219,14 @@ extras/                 Google Earth Engine version + NISAR GCOV → GeoTIFF con
 ```
 
 ## Limitations (say these in the pitch – judges like honesty)
-- Imagery comes from NASA GIBS visualisations (exact class colours for categorical products; radar
-  is a brightness-based indicator, not calibrated dB).
+- The raster pipeline has been tested with GeoTIFF fixtures built from the documented class values,
+  not yet end-to-end against live NASA files (the development environment could not reach NASA).
+  Run `npm run test:integration` with a token to check it; the app also prints per-acquisition
+  diagnostics (raw value histogram, file version, projection) so any mismatch is visible.
+- DIST-ALERT-S1 band name (`GEN-DIST-STATUS`) and the MODIS flood file layout are assumptions until
+  checked against live files; the app reports them as missing bands rather than guessing.
+- Fire, chlorophyll, rainfall and radar-brightness indicators still come from NASA GIBS
+  visualisations (labelled as estimates; radar is brightness-based, not calibrated dB).
 - Clouds hide optical data (DIST-ALERT, DSWx-HLS, chlorophyll); radar datasets (RTC-S1, DSWx-S1,
   NISAR) see through clouds – that's why both are combined.
 - NISAR coverage depends on NASA's release schedule; the app reports "no acquisitions" honestly when
