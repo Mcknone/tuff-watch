@@ -51,7 +51,7 @@
             <div class="row-buttons">
               <button id="add-row" type="button" class="btn">Add point</button>
               <button id="clear-rows" type="button" class="btn btn-quiet">Clear</button>
-              <label class="toggle" title="Click or tap the map to add points"><input type="checkbox" id="pick-mode"> Pick on map</label>
+              <button type="button" id="pick-mode" class="btn btn-quiet pick-link" aria-pressed="false" title="Show a crosshair on the map and add the point under it">Pick on map</button>
             </div>
             <label class="inline">Radius for one point
               <input type="number" id="radius" value="10" min="0.5" max="100" step="0.5"> km</label>
@@ -127,7 +127,7 @@
           </div>
           <label class="chk" title="Show latitude and longitude lines"><input type="checkbox" id="graticule"> Lat/Lon grid</label>
           <label class="chk" title="Show relief in 3D (tilt with right-drag)"><input type="checkbox" id="terrain"> 3D terrain</label>
-          <button type="button" id="pick-btn" class="tool-btn" aria-pressed="false" title="Click or tap the map to add area-of-interest points (for touchpads and touch screens)">Add point</button>
+          <button type="button" id="pick-btn" class="tool-btn" aria-pressed="false" title="Show a crosshair: move the map under it, then press “Add point here” (works with touchpads and touch screens)">Add point</button>
         </div>
       </div>
       <div class="map-help">
@@ -135,6 +135,12 @@
         <div id="controls-help" class="controls-help" hidden></div>
       </div>
       <div id="legend" class="legend" aria-live="polite"></div>
+      <div class="crosshair" id="crosshair" hidden aria-hidden="true"></div>
+      <div class="pick-bar" id="pick-bar" hidden role="group" aria-label="Add a point">
+        <span>Move the map so the crosshair is on the spot</span>
+        <button type="button" id="pick-add" class="btn btn-primary">Add point here</button>
+        <button type="button" id="pick-done" class="btn">Done</button>
+      </div>
       <div id="toast" class="toast" role="status" aria-live="polite"></div>
     </section>
 
@@ -150,7 +156,15 @@
           <div class="tl-controls">
             <button id="play" type="button" title="Play through dates" aria-label="Play through dates" disabled>▶</button>
             <input type="range" id="slider" min="0" max="0" value="0" disabled aria-label="Selected date">
-            <div class="tl-date"><b id="tl-date">—</b><span id="tl-sub">Run an analysis to build the timeline</span></div>
+            <div class="tl-date"><b><span id="tl-date">—</span> <span id="phase-chip" class="phase-chip" hidden></span></b><span id="tl-sub">Run an analysis to build the timeline</span></div>
+            <div class="phase-nav" id="phase-nav" role="group" aria-label="Event navigation" hidden>
+              <select id="event-select" aria-label="Event to navigate"></select><span id="event-single" class="pn-single"></span>
+              <div class="seg">
+                <button type="button" data-phase="before">Before</button>
+                <button type="button" data-phase="during">During</button>
+                <button type="button" data-phase="after">After</button>
+              </div>
+            </div>
             <label class="toggle" id="baseline-toggle" hidden title="Show the pre-event water baseline on the map to compare with the selected date">
               <input type="checkbox" id="show-baseline"> Show pre-event baseline</label>
           </div>

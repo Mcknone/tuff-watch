@@ -294,7 +294,10 @@ export const CONTEXT_LAYERS = [
 
 export const UNOBSERVED_LABELS = UNOBSERVED_RE;
 
-// Ready-made examples of real events
+// Ready-made examples of real events.
+// `records` are officially REPORTED dates (agency reports), shown on the event track
+// separately from satellite-derived dates and never used to compute them. They apply only
+// while the example's area and a period containing the date are unchanged.
 export const EXAMPLES = [
   {
     name: 'South Papua (Merauke) – forest clearing 2026',
@@ -306,13 +309,24 @@ export const EXAMPLES = [
     name: 'Texas Hill Country floods – July 2025',
     rows: [[29.95, -99.40], [30.15, -99.05]],
     start: '2025-06-15', end: '2025-07-25', eventDate: '2025-07-04',
-    phenomena: ['water']
+    phenomena: ['water'],
+    records: [
+      { phenomenon: 'water', type: 'reported-onset', date: '2025-07-04',
+        label: 'Catastrophic flash flooding on the Guadalupe River reported',
+        source: 'U.S. National Weather Service (NWS Austin/San Antonio) warnings and event reports' }
+    ]
   },
   {
     name: 'Palisades fire, Los Angeles – January 2025',
     rows: [[34.02, -118.68], [34.13, -118.48]],
     start: '2024-12-15', end: '2025-02-28',
-    phenomena: ['fire', 'vegetation']
+    phenomena: ['fire', 'vegetation'],
+    records: [
+      { phenomenon: 'fire', type: 'reported-onset', date: '2025-01-07',
+        label: 'Palisades Fire reported (ignition)', source: 'CAL FIRE incident report – Palisades Fire' },
+      { phenomenon: 'fire', type: 'containment', date: '2025-01-31',
+        label: 'Reported 100 % contained', source: 'CAL FIRE incident report – Palisades Fire' }
+    ]
   },
   {
     name: 'Lake Erie algae bloom – summer 2025',

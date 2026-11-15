@@ -21,7 +21,7 @@ window.maplibregl = (function(){
     setProjection(p){ this.proj=p; } setTerrain(t){ this.terrain=t; } getPitch(){ return 0; } getZoom(){ return 2; }
     easeTo(){} resize(){}
     getCanvasContainer(){ return document.getElementById('map'); } getCanvas(){ return document.getElementById('map'); }
-    unproject(p){ return { lng: 10 + p[0] / 100, lat: -5 - p[1] / 100 }; }
+    unproject(p){ return { lng: 10 + p[0] / 100, lat: -5 - p[1] / 100 }; } getCenter(){ return { lng: 140.3, lat: -8.25 }; }
     get dragRotate(){ return { enable(){} }; } get touchZoomRotate(){ return { enable(){} }; } get touchPitch(){ return { enable(){} }; } }
   class Marker { constructor(){ window.__markers = (window.__markers || 0) + 1; } setLngLat(){ return this; } addTo(){ return this; } remove(){} }
   return { Map, Marker, NavigationControl: class{}, ScaleControl: class{} };
@@ -78,7 +78,7 @@ def api(route):
         w, h = int(q['WIDTH']), int(q['HEIGHT'])
         if q.get('proj') == '3857': return route.fulfill(body=png(w,h,q['LAYERS'],q.get('TIME','')), content_type='image/png')
         bbox = [float(v) for v in q['BBOX'].split(',')]
-        assert bbox[0] < bbox[2] and bbox[1] < bbox[3] and bbox[0] < 0, 'WMS 1.3.0 lat,lon order expected'
+        assert bbox[0] < bbox[2] and bbox[1] < bbox[3] and abs(bbox[0]) <= 90 and abs(bbox[2]) <= 90, 'WMS 1.3.0 lat,lon order expected'
         return route.fulfill(body=png(w,h,q['LAYERS'],q.get('TIME','')), content_type='image/png')
     route.fulfill(status=404, json={'error':'?'})
 
@@ -137,6 +137,29 @@ with sync_playwright() as p:
     rows1 = page.locator('#coord-body tr').count()
     ctx_prevented = page.evaluate("(() => { const e = new MouseEvent('contextmenu', {bubbles: true, cancelable: true}); document.getElementById('map').dispatchEvent(e); return e.defaultPrevented; })()")
     toast = page.inner_text('#toast')
+    # a plain left click never adds a point; "Add point" mode uses a crosshair + explicit button
+    page.dispatch_event('#map', 'click', {'button': 0, 'clientX': 300, 'clientY': 200})
+    page.wait_for_timeout(100)
+    rows_after_click = page.locator('#coord-body tr').count()
+    page.click('#pick-btn'); crosshair = page.is_visible('#crosshair')
+    page.click('#pick-add'); page.wait_for_timeout(100)
+    rows_after_pick = page.locator('#coord-body tr').count()
+    page.click('#pick-done'); crosshair_off = not page.is_visible('#crosshair')
+
+    # ---- event timeline ----
+    ev_ids = page.evaluate("[...document.querySelectorAll('#tl-svg [data-ev]')].map(g => g.dataset.ev)")
+    page.click('#tl-svg [data-ev=ev-water] rect >> nth=0', force=True); page.wait_for_timeout(150)
+    ev_date = page.inner_text('#tl-date'); ev_chip = page.inner_text('#phase-chip')
+    ev_card = page.inner_text('.event-card')
+    page.click('#phase-nav [data-phase=before]'); page.wait_for_timeout(100)
+    before_date = page.inner_text('#tl-date'); before_chip = page.inner_text('#phase-chip')
+    before_findings = page.inner_text('.finding.water')
+    after_disabled = page.is_disabled('#phase-nav [data-phase=after]')
+    page.click('#phase-nav [data-phase=during]'); page.wait_for_timeout(100)
+    during_date = page.inner_text('#tl-date')
+    layers_during = page.evaluate("Object.keys(window.__map.l)")
+    with page.expect_download() as dlj: page.click('#export-json')
+    ev_json = json.load(open(dlj.value.path()))['events']
     # guided tour
     page.click('#tour-btn')
     tour_titles = []
@@ -149,10 +172,28 @@ with sync_playwright() as p:
     page.click('#tour-btn'); reopened = page.inner_text('#tour-title'); page.keyboard.press('Escape')
     with page.expect_download() as dl: page.click('#export-csv')
     csv = open(dl.value.path()).read()
+    # documented records: Palisades example (CAL FIRE reported start + containment)
+    page.select_option('#examples', '2'); page.wait_for_timeout(200)
+    page.click('#analyze')
+    page.wait_for_function("document.querySelector('#analyze').disabled === false && document.querySelector('.event-card')", timeout=30000)
+    page.select_option('#event-select', 'ev-fire') if page.is_visible('#event-select') else None
+    page.wait_for_timeout(150)
+    fire_card = page.inner_text('.event-card')
+    # date filtering: shorten the period so the containment date falls outside it
+    page.fill('#end', '2025-01-20'); page.click('#analyze')
+    page.wait_for_function("document.querySelector('#analyze').disabled === false", timeout=30000)
+    page.wait_for_timeout(200)
+    page.select_option('#event-select', 'ev-fire') if page.is_visible('#event-select') else None
+    fire_card2 = page.inner_text('.event-card')
     page.screenshot(path='/home/claude/e2e_screenshot.png', full_page=False)
     b.close()
 srv.shutdown()
 
+print('EVENTS', ev_ids, ev_date, ev_chip, before_date, before_chip, during_date, after_disabled)
+print('EVENT CARD:\n', ev_card[:900])
+print('EV JSON', json.dumps([{k: e[k] for k in ('id', 'status', 'onset_window', 'end_window', 'confidence')} for e in ev_json])[:900])
+print('pick', rows_after_click, rows_after_pick, crosshair, crosshair_off)
+print('FIRE', fire_card[:600]); print('FIRE filtered', fire_card2[:300])
 print('TOUR', tour_titles, last_btn, progress, back_title, tour_closed, reopened)
 print('rows', rows0, rows1, 'ctx prevented', ctx_prevented, 'toast', toast)
 print('first date', first_date, '| layers original', layers_orig, '| classified', layers_cls, '| ctx', layers_ctx)
@@ -179,5 +220,25 @@ assert 'new_water_km2' in csv.splitlines()[0]
 assert rows1 == rows0 + 1 and ctx_prevented and 'added' in toast
 # tour
 assert tour_titles[0].startswith('Welcome') and len(set(tour_titles)) == 8
+# events: flood onset is the window between the last dry (2026-07-01) and first flooded (2026-08-14) observation
+assert 'ev-water' in ev_ids
+wev = next(e for e in ev_json if e['id'] == 'ev-water')
+assert wev['onset_window']['earliest'] == '2026-07-01' and wev['onset_window']['latest'] == '2026-08-14'
+assert wev['status'] == 'ongoing' and wev['end_window'] is None and wev['date_estimation_method'] and wev['sources']
+assert wev['supporting_observations'] and wev['confidence'] in ('High', 'Medium', 'Low')
+assert ev_date == '2026-08-14' and ev_chip.startswith('During')
+assert before_date == '2026-07-01' and before_chip.startswith('Before') and 'Pre-event baseline' not in ev_date
+assert after_disabled and during_date == '2026-08-14'
+assert 'Onset' in ev_card and 'window' in ev_card and 'Peak observed' in ev_card and 'not observed' in ev_card
+assert 'classified' in layers_during
+fev = next(e for e in ev_json if e['id'] == 'ev-fire')
+assert fev['status'] in ('none', 'ongoing', 'detected', 'insufficient')
+assert 'on or before' in fire_card                     # fire seen from the first sample: start not bounded, not back-dated
+# left click never adds points; crosshair mode does
+assert rows_after_click == rows1 and crosshair and rows_after_pick == rows1 + 1 and crosshair_off
+# documented records (Palisades example): shown as reported, separate from detections, filtered by period
+assert 'Containment' in fire_card and 'reported, not satellite-derived' in fire_card and 'not</b> containment' not in fire_card
+assert 'is not containment' in fire_card.replace('\n', ' ') or 'not containment' in fire_card
+assert 'Containment' not in fire_card2 and 'Reported' in fire_card2
 assert last_btn == 'Start exploring' and progress == 'Step 8 of 8' and tour_closed and reopened.startswith('Welcome')
 print('E2E: all assertions passed')

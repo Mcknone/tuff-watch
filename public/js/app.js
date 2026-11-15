@@ -16,6 +16,7 @@ import { graticuleGeoJSON, GRATICULE_RANKS } from './graticule.js';
 import { initLayout, revealPanel } from './layout.js';
 import { initTour, startTour } from './tour.js';
 import { initTerms } from './glossary.js';
+import { mergeByDate, detectEvent, phaseOf, phaseTargets, recordsInPeriod, daysBetween } from './events.js';
 
 const $ = sel => document.querySelector(sel);
 const fmtKm = v => (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
@@ -31,7 +32,9 @@ const state = {
   shown: new Set(),     // dataset ids shown in "NASA original" view
   timer: null,
   chart: null,
-  showBaseline: false   // map shows the pre-event water baseline instead of the selected date
+  showBaseline: false,  // map shows the pre-event water baseline instead of the selected date
+  activeEvent: null,    // id of the event selected on the event track
+  loadedExample: null   // example whose documented records may apply
 };
 
 // ============================================================ map set-up
@@ -143,23 +146,22 @@ canvasBox.addEventListener('mouseup', e => {
 });
 canvasBox.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });   // no paste on Linux
 
-map.on('click', e => {
-  if (!$('#pick-mode').checked) return;
-  addPointAt(e.lngLat);
-});
-
+// Left click / tap NEVER adds a point (it only moves the map). Points come from a
+// middle click, or from "Add point" mode: a crosshair at the map centre plus an
+// explicit "Add point here" button – so panning can never create points by accident.
+let picking = false;
 function setPickMode(on) {
-  $('#pick-mode').checked = on;
-  $('#pick-btn').setAttribute('aria-pressed', String(on));
-  $('#pick-btn').classList.toggle('on', on);
-  $('#map-wrap').classList.toggle('picking', on);
+  picking = on;
+  for (const b of [$('#pick-btn'), $('#pick-mode')]) { b.setAttribute('aria-pressed', String(on)); b.classList.toggle('on', on); }
+  $('#crosshair').hidden = !on;
+  $('#pick-bar').hidden = !on;
+  if (on) $('#pick-add').focus();
 }
-$('#pick-mode').addEventListener('change', e => setPickMode(e.target.checked));
-$('#pick-btn').addEventListener('click', () => {
-  const on = !$('#pick-mode').checked;
-  setPickMode(on);
-  if (on) toast('Add-point mode on: click or tap the map to add AOI corners. Press the button again to stop.');
-});
+$('#pick-btn').addEventListener('click', () => setPickMode(!picking));
+$('#pick-mode').addEventListener('click', () => setPickMode(!picking));
+$('#pick-add').addEventListener('click', () => addPointAt(map.getCenter()));
+$('#pick-done').addEventListener('click', () => { setPickMode(false); $('#pick-btn').focus(); });
+$('#pick-bar').addEventListener('keydown', e => { if (e.key === 'Escape') { setPickMode(false); $('#pick-btn').focus(); } });
 
 function addPointAt(lngLat) {
   const lng = ((lngLat.lng + 540) % 360) - 180;
@@ -192,8 +194,8 @@ function toast(msg) {
 // control legend (mouse vs touch wording)
 const coarse = matchMedia('(pointer: coarse)').matches;
 $('#controls-help').innerHTML = coarse
-  ? '<b>Map controls</b><span>One finger: move</span><span>Two fingers: zoom, rotate, tilt</span><span>Add-point mode + tap: add AOI point</span>'
-  : '<b>Map controls</b><span><kbd>Left-drag</kbd> move</span><span><kbd>Right-drag</kbd> rotate / tilt</span><span><kbd>Wheel</kbd> zoom</span><span><kbd>Middle-click</kbd> add AOI point</span><span>No middle button? Use <b>Add point</b>.</span>';
+  ? '<b>Map controls</b><span>One finger: move</span><span>Two fingers: zoom, rotate, tilt</span><span>Tapping never adds points. Use <b>Add point</b>: move the map under the crosshair, then press <b>Add point here</b>.</span>'
+  : '<b>Map controls</b><span><kbd>Left-drag</kbd> move (clicks never add points)</span><span><kbd>Right-drag</kbd> rotate / tilt</span><span><kbd>Wheel</kbd> zoom</span><span><kbd>Middle-click</kbd> add AOI point</span><span>No middle button? <b>Add point</b> shows a crosshair to place points.</span>';
 $('#help-toggle').addEventListener('click', () => {
   const box = $('#controls-help');
   const show = box.hidden;
@@ -427,6 +429,7 @@ $('#examples').addEventListener('change', e => {
   loadExample(EXAMPLES[+e.target.value]);
 });
 function loadExample(ex) {
+  state.loadedExample = ex;
   $('#coord-body').innerHTML = '';
   ex.rows.forEach(([lat, lon]) => addRow(lat, lon));
   if (ex.radiusKm) $('#radius').value = ex.radiusKm;
@@ -504,6 +507,8 @@ async function analyze() {
     (failed ? ` (${failed} without usable imagery – see Data sources).` : '.') +
     `\nAnalysed ${state.dates.length} dates between ${state.dates[0]} and ${state.dates.at(-1)}.`);
   $('#export-csv').disabled = $('#export-json').disabled = false;
+  results.events = buildEvents(results);
+  state.activeEvent = (results.events.find(e => e.firstAffected) || {}).id || null;
   buildTimeline();
   showTab('findings');
   selectDate(state.dateIdx);
@@ -540,9 +545,16 @@ async function runDataset(ds, results, n, imgLimit, tick) {
         return;
       }
     } else {
-      dates = dailyDates(start, end, ds.method === 'water' ? Math.max(n, 12) : n);
+      dates = dailyDates(start, end, ds.method === 'water' ? Math.max(n, 12) : ds.phenomenon === 'fire' ? Math.max(n, 16) : n);
     }
-    r.acqDates = ds.dates === 'granules' && r.cmr ? r.cmr.dates : dates;
+    // date filtering: never use an observation outside the selected period
+    const outside = dates.filter(d => d < start || d > end).length;
+    if (outside) {
+      dates = dates.filter(d => d >= start && d <= end);
+      r.errors.push(`${outside} catalogue date(s) outside the selected period were ignored.`);
+      if (!dates.length) { r.status = 'no-data'; r.errors.push('No acquisitions inside the selected period.'); renderSources(); return; }
+    }
+    r.acqDates = dates;
     const picked = ds.phenomenon === 'water' ? pickDates(dates, n, results.eventDate) : sampleDates(dates, n);
 
     // 2. NASA colour map → classifier
@@ -743,6 +755,120 @@ function summarizeWater(date) {
   return { rs, rows, rain, rainInfo, headline, agreement, agreeWith, confidence, verdict };
 }
 
+// ============================================================ events
+/**
+ * One event per phenomenon, built only from analysed observations:
+ *  floods  – a date is affected when a valid source (≥ 25 % coverage, known baseline) shows new water
+ *  fires   – a date is affected when VIIRS shows any active-fire pixel
+ *  others  – a date is affected when the intensity level is above "none"
+ * Reported dates (agency records, the user's flood event date) are attached separately.
+ */
+const EVENT_KIND = { water: 'flood', fire: 'fire', vegetation: 'change', algae: 'change' };
+const EVENT_TITLE = { water: 'Flood', fire: 'Wildfire', vegetation: 'Vegetation loss', algae: 'Algae bloom' };
+
+function observationsFor(pid, res) {
+  const obs = [];
+  for (const r of res.byId.values()) {
+    if (r.status !== 'live' || r.ds.phenomenon !== pid || isRain(r)) continue;
+    for (const f of r.frames) {
+      if (!f.stats) continue;
+      let state, value;
+      if (isWater(r)) {
+        const st = f.stats;
+        const thr = Math.max(0.05, 0.005 * st.validKm2);
+        if (st.coveragePct < 25) state = 'unknown';
+        else if (f.role === 'baseline') state = 'clear';
+        else if (!r.baseline) state = 'unknown';
+        else state = st.newKm2 >= thr ? 'affected' : 'clear';
+        value = f.role === 'post' ? st.newKm2 : 0;
+      } else {
+        const lv = overallLevel(f.stats, res.grid.aoiKm2);
+        state = r.ds.method === 'presence' ? (f.stats.affected > 0 ? 'affected' : 'clear') : (lv > 0 ? 'affected' : 'clear');
+        value = f.stats.affected;
+      }
+      obs.push({ date: f.date, source: r.ds.name, state, value, coveragePct: f.coverage != null ? f.coverage * 100 : null });
+    }
+  }
+  return obs;
+}
+
+function buildEvents(res) {
+  const ex = state.loadedExample;
+  const sameArea = ex && JSON.stringify(ex.rows.map(([a, b]) => [+a, +b])) ===
+    JSON.stringify(readPoints().pts.map(([lon, lat]) => [lat, lon]));
+  const records = sameArea ? recordsInPeriod(ex.records, res.start, res.end) : [];
+  res.recordsOutside = sameArea ? (ex.records || []).filter(r => !records.includes(r)) : [];
+  return res.phen.map(pid => {
+    const raw = observationsFor(pid, res);
+    const series = mergeByDate(raw);
+    const kind = EVENT_KIND[pid] || 'change';
+    const ev = detectEvent(series, { kind, periodStart: res.start, periodEnd: res.end, unit: 'km²', recession: kind === 'flood' });
+    ev.id = `ev-${pid}`;
+    ev.phenomenon = pid;
+    ev.title = EVENT_TITLE[pid] || PHENOMENA[pid].short;
+    ev.sources = [...new Set(raw.map(o => o.source))];
+    ev.supporting = raw.filter(o => o.state === 'affected').map(o => ({ date: o.date, source: o.source, value: +o.value.toFixed(3) }));
+    ev.reported = records.filter(r => r.phenomenon === pid).map(r => ({ ...r }));
+    if (pid === 'water' && res.eventDate) {
+      ev.reported.push({ phenomenon: 'water', type: 'user', date: res.eventDate, label: 'Flood event date entered by the user', source: 'User input (used to split baseline / post-event observations)' });
+    }
+    ev.valueLabel = kind === 'flood' ? 'newly inundated area' : kind === 'fire' ? 'active-fire pixel area' : 'affected area';
+    return ev;
+  });
+}
+
+const activeEvent = () => (state.results && state.results.events || []).find(e => e.id === state.activeEvent) || null;
+const fmtDay = d => { const t = new Date(d + 'T00:00:00Z'); return t.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }); };
+function windowText(earliest, latest) {
+  if (!earliest) return `on or before ${fmtDay(latest)}`;
+  if (earliest === latest) return fmtDay(latest);
+  return `${fmtDay(earliest)} – ${fmtDay(latest)} <small>(${daysBetween(earliest, latest)}-day window between observations)</small>`;
+}
+
+/** Select an event: jump to its "during" observation and sync everything. */
+function selectEvent(id, phase = 'during') {
+  state.activeEvent = id;
+  const ev = activeEvent();
+  renderPhaseNav();
+  if (!ev) { drawTimelineSvg(); return; }
+  goPhase(phase);
+}
+
+function goPhase(phase) {
+  const ev = activeEvent();
+  const t = phaseTargets(ev, state.dates);
+  const date = t[phase];
+  if (!date) return;
+  stopPlay();
+  selectDate(state.dates.indexOf(date));
+}
+
+function renderPhaseNav() {
+  const nav = $('#phase-nav');
+  const evs = state.results ? (state.results.events || []).filter(e => e.firstAffected) : [];
+  nav.hidden = !evs.length;
+  if (!evs.length) return;
+  if (!activeEvent() || !activeEvent().firstAffected) state.activeEvent = evs[0].id;
+  const sel = $('#event-select');
+  sel.innerHTML = evs.map(e => `<option value="${e.id}" ${e.id === state.activeEvent ? 'selected' : ''}>${esc(e.title)}</option>`).join('');
+  sel.hidden = evs.length < 2;
+  $('#event-single').textContent = evs.length < 2 ? (activeEvent() || evs[0]).title : '';
+  const ev = activeEvent();
+  const t = phaseTargets(ev, state.dates);
+  const cur = phaseOf(ev, state.dates[state.dateIdx]);
+  for (const ph of ['before', 'during', 'after']) {
+    const b = nav.querySelector(`[data-phase=${ph}]`);
+    b.disabled = !t[ph];
+    b.classList.toggle('on', cur === ph);
+    b.setAttribute('aria-pressed', String(cur === ph));
+    b.title = t[ph]
+      ? { before: `Last observation before the event (${t.before})`, during: `Peak observed ${ev.valueLabel} (${t.during})`, after: `First observation after the event (${t.after})` }[ph]
+      : { before: 'No observation before the event in this period', during: 'No affected observation', after: 'No observation after the event yet – it may be ongoing' }[ph];
+  }
+}
+$('#event-select').addEventListener('change', e => selectEvent(e.target.value));
+document.querySelectorAll('#phase-nav [data-phase]').forEach(b => b.addEventListener('click', () => goPhase(b.dataset.phase)));
+
 // ============================================================ timeline
 function buildTimeline() {
   const slider = $('#slider');
@@ -755,6 +881,7 @@ function buildTimeline() {
   $('#baseline-toggle').hidden = !hasWater;
   drawTimelineSvg();
   buildChart();
+  renderPhaseNav();
 }
 
 $('#slider').addEventListener('input', e => selectDate(+e.target.value));
@@ -783,6 +910,15 @@ function selectDate(idx) {
   $('#tl-date').textContent = date;
   const imaged = liveResults().filter(r => r.frames.some(f => f.stats && f.date === date)).map(r => r.ds.name);
   $('#tl-sub').textContent = imaged.length ? `New observations: ${imaged.join(', ')}` : 'Showing the latest observation of each dataset';
+  const ev = activeEvent(), ph = phaseOf(ev, date);
+  const chip = $('#phase-chip');
+  chip.hidden = !ph;
+  if (ph) {
+    chip.textContent = ph === 'uncertain' ? `${ev.title}: uncertain at this date` : `${ph[0].toUpperCase() + ph.slice(1)} ${ev.title.toLowerCase()}`;
+    chip.title = ph === 'uncertain' ? 'This date lies in a window between observations, or after the last observation of an event whose end was not observed.' : '';
+    chip.className = `phase-chip ph-${ph}`;
+  }
+  renderPhaseNav();
   drawTimelineSvg();
   if (state.chart) state.chart.update('none');
   renderFindings();
@@ -796,10 +932,13 @@ function drawTimelineSvg() {
   const res = state.results;
   if (!res) { svg.innerHTML = ''; return; }
   const rows = [...res.byId.values()];
+  const evs = res.events || [];
   const box = svg.parentElement;
-  const left = 150, right = 12, top = 22;
-  const rowH = Math.max(18, Math.min(24, ((box.clientHeight || 200) - top - 26) / Math.max(rows.length, 1)));
-  const W = box.clientWidth || 600, H = Math.max(box.clientHeight || 200, Math.ceil(top + rows.length * rowH + 26));
+  const left = (box.clientWidth || 600) < 480 ? 112 : 150, right = 12, top = 22;
+  const evRowH = 24, evH = evs.length ? 16 + evs.length * evRowH + 8 : 0;    // event track above the satellite tracks
+  const dsTop = top + evH;
+  const rowH = Math.max(18, Math.min(24, ((box.clientHeight || 200) - dsTop - 26) / Math.max(rows.length, 1)));
+  const W = box.clientWidth || 600, H = Math.max(box.clientHeight || 200, Math.ceil(dsTop + rows.length * rowH + 26));
   svg.style.height = `${H}px`;
   const t0 = Date.parse(res.start), t1 = Date.parse(res.end) + 86400000;
   const x = d => left + ((Date.parse(d) - t0) / (t1 - t0)) * (W - left - right);
@@ -810,9 +949,9 @@ function drawTimelineSvg() {
   const baseEnd = res.eventDate || (baseEnds.length ? baseEnds.sort().at(-1) : null);
   if (baseEnd && rows.some(isWater)) {
     const xe = Math.min(x(baseEnd) + (res.eventDate ? 0 : 3), W - right);
-    s += `<rect x="${left}" y="${top - 6}" width="${Math.max(0, xe - left)}" height="${H - top - 10}" fill="#f2f5f8"/>` +
+    s += `<rect x="${left}" y="${dsTop - 6}" width="${Math.max(0, xe - left)}" height="${H - dsTop - 10}" fill="#f2f5f8"/>` +
          `<text x="${left + 4}" y="${H - 18}" font-size="9" fill="${C.text}">pre-event baseline</text>`;
-    if (res.eventDate) s += `<line x1="${xe}" x2="${xe}" y1="${top - 6}" y2="${H - 10}" stroke="#a8650a" stroke-dasharray="3 3"/><text x="${xe + 3}" y="${H - 18}" font-size="9" fill="#a8650a">event ${res.eventDate}</text>`;
+    if (res.eventDate) s += `<line x1="${xe}" x2="${xe}" y1="${dsTop - 6}" y2="${H - 10}" stroke="#a8650a" stroke-dasharray="3 3"/><text x="${xe + 3}" y="${H - 18}" font-size="9" fill="#a8650a">event date ${res.eventDate}</text>`;
   }
   // month ticks
   const d = new Date(res.start + 'T00:00:00Z'); d.setUTCDate(1);
@@ -828,10 +967,15 @@ function drawTimelineSvg() {
     }
     d.setUTCMonth(d.getUTCMonth() + stepMonths);
   }
+  s += eventTrackSvg(evs, { x, left, right, top, W, evRowH, C, t0, t1 });
+  if (evs.length) {
+    s += `<line x1="0" x2="${W}" y1="${dsTop - 9}" y2="${dsTop - 9}" stroke="${C.line}"/>` +
+         `<text x="6" y="${dsTop + 2}" font-size="9" font-weight="600" letter-spacing=".08em" fill="${C.text}">SATELLITE OBSERVATIONS</text>`;
+  }
   const wc = PHENOMENA.water.water;
   const maxRain = Math.max(0.1, ...rows.filter(isRain).flatMap(r => r.frames.filter(f => f.rain).map(f => f.rain.mean)));
   rows.forEach((r, i) => {
-    const y = top + i * rowH + rowH / 2;
+    const y = dsTop + 8 + i * rowH + rowH / 2;
     const ramp = PHENOMENA[r.ds.phenomenon].ramp;
     s += `<text x="6" y="${y + 4}" font-size="11" fill="${C.ink}">${esc(r.ds.name.replace(/^OPERA /, '').replace(/ \(.*\)$/, ''))}</text>`;
     s += `<line x1="${left}" x2="${W - right}" y1="${y}" y2="${y}" stroke="${C.line}"/>`;
@@ -875,10 +1019,15 @@ function drawTimelineSvg() {
     const xx = x(state.dates[state.dateIdx]);
     s += `<line x1="${xx}" x2="${xx}" y1="${top - 6}" y2="${H - 10}" stroke="${C.accent}" stroke-width="2"/>`;
   }
-  s += `<text x="6" y="${H - 3}" font-size="9" fill="${C.text}">ticks = NASA acquisitions · ● analysed (filled = change found) · ■ water baseline · ◌ low coverage · × no image</text>`;
+  s += `<text x="6" y="${H - 3}" font-size="9" fill="${C.text}">Event track: solid = observed · hatched = date uncertainty window · ▲ peak · ┊ reported date  |  ticks = NASA acquisitions · ● analysed · ■ water baseline · ◌ low coverage · × no image</text>`;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   svg.innerHTML = s;
+  svg.querySelectorAll('[data-ev]').forEach(g => {
+    g.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectEvent(g.dataset.ev); } });
+  });
   svg.onclick = ev => {
+    const hit = ev.target.closest && ev.target.closest('[data-ev]');
+    if (hit) { selectEvent(hit.dataset.ev); return; }
     const rect = svg.getBoundingClientRect();
     const px = ((ev.clientX - rect.left) / rect.width) * W;
     const t = t0 + ((px - left) / (W - left - right)) * (t1 - t0);
@@ -886,6 +1035,69 @@ function drawTimelineSvg() {
     state.dates.forEach((dd, i) => { const dt = Math.abs(Date.parse(dd) - t); if (dt < bd) { bd = dt; best = i; } });
     selectDate(best);
   };
+}
+/** SVG for the event track: one row per phenomenon. */
+function eventTrackSvg(evs, g) {
+  if (!evs.length) return '';
+  const { x, left, right, top, W, evRowH, C } = g;
+  const clampX = d => Math.max(left, Math.min(W - right, x(d)));
+  const endX = d => clampX(new Date(Date.parse(d) + 86400000).toISOString().slice(0, 10));   // end of that day
+  let s = `<defs><pattern id="ev-hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="5" height="5" fill="#ffffff"/><line x1="0" y1="0" x2="0" y2="5" stroke="currentColor" stroke-width="2.2" stroke-opacity=".55"/></pattern>
+    <linearGradient id="ev-fade-l"><stop offset="0" stop-color="#fff" stop-opacity="1"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <linearGradient id="ev-fade-r"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#fff" stop-opacity="1"/></linearGradient></defs>`;
+  s += `<text x="6" y="${top + 6}" font-size="9" font-weight="600" letter-spacing=".08em" fill="${C.text}">EVENTS</text>`;
+  evs.forEach((ev, i) => {
+    const y = top + 14 + i * evRowH, h = 12, cy = y + h / 2;
+    const col = ev.phenomenon === 'water' ? PHENOMENA.water.water.new : PHENOMENA[ev.phenomenon].ramp[2];
+    const active = ev.id === state.activeEvent;
+    const statusTxt = { detected: '', ongoing: ' · ongoing', insufficient: ' · uncertain', none: ' · none', 'no-data': ' · no data' }[ev.status];
+    s += `<text x="6" y="${cy + 4}" font-size="11" fill="${C.ink}" ${active ? 'font-weight="600"' : ''}>${esc(ev.title)}<tspan fill="${C.text}" font-size="10">${statusTxt}</tspan></text>`;
+    if (ev.status === 'none' || ev.status === 'no-data') {
+      s += `<text x="${left + 4}" y="${cy + 4}" font-size="10" fill="${C.text}">${ev.status === 'none' ? 'Not detected in any valid observation' : 'No usable observations'}</text>`;
+      return;
+    }
+    const label = ev.status === 'insufficient'
+      ? `${ev.title}: uncertain – ${ev.confidenceReasons[0]}`
+      : `${ev.title}\nOnset: ${ev.onset.earliest ? `${ev.onset.earliest} → ${ev.onset.latest}` : `on or before ${ev.onset.latest}`}\n` +
+        `Peak observed: ${ev.peak.date} (${fmtKm(ev.peak.value)} km²)\nEnd: ${ev.end ? `${ev.end.earliest} → ${ev.end.latest}` : 'not observed (ongoing or unknown)'}\nConfidence in dates: ${ev.confidence}\nClick to view this period`;
+    s += `<g data-ev="${ev.id}" tabindex="0" role="button" aria-label="${esc(label.replace(/\n/g, '. '))}" class="ev-band${active ? ' active' : ''}" style="color:${col};cursor:pointer"><title>${esc(label)}</title>`;
+    if (ev.status === 'insufficient') {
+      const x1 = clampX(ev.band.start), x2 = endX(ev.band.end);
+      s += `<rect x="${x1}" y="${y}" width="${Math.max(4, x2 - x1)}" height="${h}" fill="url(#ev-hatch)" style="color:#8a94a3" stroke="#8a94a3" stroke-dasharray="3 2"/>`;
+      s += `<text x="${x1 + 4}" y="${cy + 3.5}" font-size="9" fill="${C.ink}" paint-order="stroke" stroke="#fff" stroke-width="3">uncertain – insufficient evidence</text></g>`;
+      return;
+    }
+    const b = ev.band;
+    const xs = clampX(b.start), xc1 = clampX(b.coreStart), xc2 = endX(b.coreEnd), xe = endX(b.end);
+    // uncertainty windows (hatched) and observed core (solid)
+    if (xc1 > xs) s += `<rect x="${xs}" y="${y}" width="${xc1 - xs}" height="${h}" fill="url(#ev-hatch)"/>`;
+    if (xe > xc2) s += `<rect x="${xc2}" y="${y}" width="${xe - xc2}" height="${h}" fill="url(#ev-hatch)"/>`;
+    s += `<rect x="${xc1}" y="${y}" width="${Math.max(4, xc2 - xc1)}" height="${h}" fill="${col}"/>`;
+    if (b.openStart) s += `<rect x="${xs}" y="${y}" width="${Math.min(24, xc1 - xs)}" height="${h}" fill="url(#ev-fade-l)"/><text x="${xs + 1}" y="${cy + 3.5}" font-size="10" fill="${C.text}">‹</text>`;
+    if (b.openEnd) s += `<rect x="${Math.max(xc2, xe - 24)}" y="${y}" width="${Math.min(24, xe - xc2)}" height="${h}" fill="url(#ev-fade-r)"/><text x="${xe - 7}" y="${cy + 3.5}" font-size="10" fill="${C.text}">›</text>`;
+    if (active) s += `<rect x="${xs - 1}" y="${y - 2}" width="${xe - xs + 2}" height="${h + 4}" fill="none" stroke="${C.ink}" stroke-width="1.2"/>`;
+    // markers: onset (first affected), peak, recession, end (first clear after)
+    s += `<line x1="${xc1}" x2="${xc1}" y1="${y - 3}" y2="${y + h + 3}" stroke="${C.ink}" stroke-width="1.5"><title>First ${ev.kind === 'fire' ? 'active-fire detection' : 'affected observation'}: ${ev.firstAffected}</title></line>`;
+    const px = x(ev.peak.date) + (endX(ev.peak.date) - x(ev.peak.date)) / 2;
+    s += `<path d="M${px - 4.5},${y - 1} L${px + 4.5},${y - 1} L${px},${y + 6} Z" fill="${C.ink}"><title>Peak observed ${ev.valueLabel}: ${fmtKm(ev.peak.value)} km² on ${ev.peak.date} (${esc(ev.peak.source)})</title></path>`;
+    if (ev.recession && ev.recession.date !== (ev.end && ev.end.latest)) {
+      const rx = clampX(ev.recession.date);
+      s += `<path d="M${rx - 3.5},${y + h + 1} L${rx + 3.5},${y + h + 1} L${rx},${y + h - 5} Z" fill="${C.text}"><title>Recession observed ${ev.recession.date}: ${esc(ev.recession.basis)}</title></path>`;
+    }
+    if (ev.end) s += `<line x1="${xe}" x2="${xe}" y1="${y - 3}" y2="${y + h + 3}" stroke="${C.ink}" stroke-width="1.5"><title>First observation after the event: ${ev.end.latest}</title></line>`;
+    s += '</g>';
+    // reported (documented) dates – separate from satellite evidence
+    for (const r of ev.reported || []) {
+      const rx = x(r.date);
+      if (rx < left || rx > W - right) continue;
+      const colr = r.type === 'containment' ? '#2e7a4d' : '#a8650a';
+      s += `<g><title>${esc(r.label)} – ${r.date}\nSource: ${esc(r.source)}\n(reported date, not derived from satellite data)</title>` +
+           `<line x1="${rx}" x2="${rx}" y1="${y - 4}" y2="${y + h + 4}" stroke="${colr}" stroke-width="1.5" stroke-dasharray="2 2"/>` +
+           `<path d="M${rx},${y - 6} l6,2.5 l-6,2.5 Z" fill="${colr}"/></g>`;
+    }
+  });
+  return s;
 }
 if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => drawTimelineSvg()).observe($('#tl-svg').parentElement);
 else window.addEventListener('resize', () => drawTimelineSvg());
@@ -902,6 +1114,23 @@ function buildChart() {
       const c = chart.ctx;
       c.save(); c.strokeStyle = '#1d5fa6'; c.lineWidth = 2;
       c.beginPath(); c.moveTo(xx, chart.chartArea.top); c.lineTo(xx, chart.chartArea.bottom); c.stroke(); c.restore();
+    }
+  };
+  // shade the selected event: observed period solid, uncertainty windows lighter
+  const eventShade = {
+    id: 'eventShade',
+    beforeDatasetsDraw(chart) {
+      const ev = activeEvent();
+      const xs = chart.scales.x;
+      if (!ev || !ev.band || ev.status === 'insufficient' || !xs) return;
+      const px = d => { const i = labels.indexOf(d); return i >= 0 ? xs.getPixelForValue(i) : d < labels[0] ? chart.chartArea.left : chart.chartArea.right; };
+      const { top, bottom } = chart.chartArea, c = chart.ctx;
+      c.save();
+      c.fillStyle = 'rgba(29,95,166,.06)';
+      c.fillRect(px(ev.band.start), top, px(ev.band.end) - px(ev.band.start), bottom - top);
+      c.fillStyle = 'rgba(29,95,166,.14)';
+      c.fillRect(px(ev.band.coreStart), top, Math.max(2, px(ev.band.coreEnd) - px(ev.band.coreStart)), bottom - top);
+      c.restore();
     }
   };
   const live = liveResults();
@@ -951,7 +1180,7 @@ function buildChart() {
         if (Number.isFinite(idx)) selectDate(Math.round(idx));
       }
     },
-    plugins: [cursor]
+    plugins: [eventShade, cursor]
   });
 }
 
@@ -1111,7 +1340,48 @@ function renderFindings() {
   const date = state.dates[state.dateIdx];
   const grid = state.results.grid;
   el.innerHTML = `<p class="f-context">Area of interest <b>${fmtKm(grid.aoiKm2)} km²</b> · date <b>${date}</b> (latest observation of each dataset on or before this date)</p>` +
+    eventSummary(date) +
     state.results.phen.map(pid => (pid === 'water' ? waterFinding(date) : intensityFinding(pid, date))).join('');
+  el.querySelectorAll('[data-goto-ev]').forEach(b => b.addEventListener('click', () => selectEvent(b.dataset.gotoEv, b.dataset.phase)));
+}
+
+/** Event card for the selected event (top of Findings). */
+function eventSummary(date) {
+  const evs = state.results.events || [];
+  if (!evs.length) return '';
+  const ev = activeEvent() || evs.find(e => e.firstAffected) || evs[0];
+  const others = evs.filter(e => e !== ev && e.firstAffected);
+  const ph = phaseOf(ev, date);
+  const CONF = { High: 'c-high', Medium: 'c-med', Low: 'c-low', 'Insufficient data': 'c-none' };
+  let body;
+  if (!ev.firstAffected) {
+    body = `<p class="f-note">${ev.status === 'insufficient'
+      ? `<b>Uncertain event period.</b> ${esc(ev.confidenceReasons[0])}. No dates are estimated.`
+      : ev.status === 'none' ? 'Not detected in any valid observation in this period.' : 'No usable observations in this period.'}</p>`;
+  } else {
+    const fireNote = ev.kind === 'fire'
+      ? `<p class="f-note">Last satellite detection is <b>not</b> containment. Clouds, smoke and overpass times can hide active fire; containment comes from agency reports.</p>` : '';
+    body = `<dl class="facts">
+      <dt>Onset</dt><dd>${windowText(ev.onset.earliest, ev.onset.latest)}</dd>
+      <dt>${ev.kind === 'fire' ? 'Detections' : 'Observed'}</dt><dd>${fmtDay(ev.firstAffected)} → ${fmtDay(ev.lastAffected)} <small>(${ev.supporting.length} supporting obs.)</small></dd>
+      <dt>Peak observed</dt><dd>${fmtKm(ev.peak.value)} km² · ${fmtDay(ev.peak.date)} <small>${esc(ev.peak.source)}</small></dd>
+      ${ev.recession ? `<dt>Recession</dt><dd>${fmtDay(ev.recession.date)} <small>${esc(ev.recession.basis)}</small></dd>` : ''}
+      <dt>${ev.kind === 'fire' ? 'End of detections' : 'End / recovery'}</dt><dd>${ev.end ? windowText(ev.end.earliest, ev.end.latest) : '<span class="muted">not observed – ongoing or unknown</span>'}</dd>
+      ${(ev.reported || []).map(r => `<dt class="reported">${r.type === 'containment' ? 'Containment' : r.type === 'user' ? 'Event date' : 'Reported'}</dt><dd>${fmtDay(r.date)} <small>${esc(r.label)} · ${esc(r.source)} · reported, not satellite-derived</small></dd>`).join('')}
+      <dt><span class="term" tabindex="0" data-term="eventconf">Date confidence</span></dt><dd><span class="conf ${CONF[ev.confidence]}">${ev.confidence}</span>
+        <details class="why"><summary>Method</summary><p>${esc(ev.method)}</p><ul>${ev.confidenceReasons.map(t => `<li>${esc(t)}</li>`).join('')}</ul></details></dd>
+      <dt>Sources</dt><dd><small>${ev.sources.map(esc).join(' · ')}</small></dd>
+    </dl>${fireNote}
+    <div class="phase-links">${['before', 'during', 'after'].map(p => {
+      const t = phaseTargets(ev, state.dates)[p];
+      return `<button type="button" class="btn ${ph === p ? 'on' : ''}" data-goto-ev="${ev.id}" data-phase="${p}" ${t ? '' : 'disabled'}>${p[0].toUpperCase() + p.slice(1)}${t ? ` <small>${t}</small>` : ''}</button>`;
+    }).join('')}</div>`;
+  }
+  return `<section class="finding event-card">
+    <header class="f-head"><h3>Event · ${esc(ev.title)}</h3><span class="ev-status st-${ev.status}">${{ detected: 'Start and end observed', ongoing: 'Ongoing / end not observed', insufficient: 'Uncertain', none: 'Not detected', 'no-data': 'No data' }[ev.status]}</span></header>
+    ${body}
+    ${others.length ? `<p class="f-note">Other events: ${others.map(o => `<button type="button" class="btn-link" data-goto-ev="${o.id}" data-phase="during">${esc(o.title)}</button>`).join(' · ')}</p>` : ''}
+  </section>`;
 }
 
 function intensityFinding(pid, date) {
@@ -1123,7 +1393,7 @@ function intensityFinding(pid, date) {
       <p class="f-note">None of this phenomenon's NASA datasets had usable images for this area and period. See Data sources.</p></section>`;
   }
   const st = sum.stats;
-  const lvName = sum.level ? LEVELS[sum.level - 1].name : 'None detected';
+  const lvName = sum.level ? LEVELS[sum.level - 1].name : st.affected > 0 ? 'Below threshold' : 'None detected';
   const badgeStyle = sum.level ? `style="background:${p.ramp[sum.level - 1]};${sum.level <= 1 ? 'color:#1b2430' : ''}"` : '';
   const trendCls = Math.abs(sum.trend) < 0.01 ? 'flat' : sum.trend > 0 ? 'up' : 'down';
   const mag = Math.abs(sum.trend);
@@ -1330,6 +1600,18 @@ $('#export-json').addEventListener('click', () => {
     generated: new Date().toISOString(),
     area: { polygon_lonlat: res.aoi.polygon, bbox: res.grid.bbox, km2: res.grid.aoiKm2 },
     period: { start: res.start, end: res.end, flood_event_date: res.eventDate || null },
+    events: (res.events || []).map(e => ({
+      id: e.id, phenomenon: e.phenomenon, title: e.title, status: e.status,
+      onset_window: e.onset ? { earliest: e.onset.earliest, latest: e.onset.latest, basis: e.onset.basis } : null,
+      first_affected_observation: e.firstAffected, last_affected_observation: e.lastAffected,
+      last_unaffected_before: e.lastClearBefore, first_unaffected_after: e.firstClearAfter,
+      peak: e.peak, recession: e.recession,
+      end_window: e.end ? { earliest: e.end.earliest, latest: e.end.latest, basis: e.end.basis } : null,
+      confidence: e.confidence, confidence_reasons: e.confidenceReasons, date_estimation_method: e.method,
+      sources: e.sources, supporting_observations: e.supporting, all_observations: e.observations,
+      reported_records: e.reported
+    })),
+    reported_records_outside_period: res.recordsOutside || [],
     flood_summary: ws && ws.headline ? {
       date, verdict: ws.verdict, confidence: ws.confidence.level, confidence_reasons: ws.confidence.reasons,
       headline_source: ws.headline.r.ds.name, observation_date: ws.headline.f.date,
@@ -1359,7 +1641,7 @@ initTour([
       <p>Every number comes from real NASA observations. This tour shows the eight steps of an analysis. Use the arrow keys or the buttons; press Esc to leave.</p>` },
   { title: 'Choose an area of interest', target: panelHas('#card-aoi'), before: () => revealPanel('panel-controls'),
     body: `<p>Type latitude and longitude, or pick a ready-made example. One point makes a circle, two a rectangle, three or more a polygon.</p>
-      <p>You can also <b>middle-click</b> the map, or turn on <b>Add point</b> and click or tap.</p>` },
+      <p>You can also <b>middle-click</b> the map, or use <b>Add point</b>: move the map under the crosshair and press <b>Add point here</b>. Ordinary clicks never add points.</p>` },
   { title: 'Set the date range', target: panelHas('#card-time'), before: () => revealPanel('panel-controls'),
     body: `<p>Pick the period to analyse. For floods, set the <b>flood event date</b>: observations before it form the pre-event baseline, so permanent rivers and lakes are not counted as flooding.</p>` },
   { title: 'Select phenomena', target: panelHas('#card-phen'), before: () => revealPanel('panel-controls'),
@@ -1371,9 +1653,9 @@ initTour([
     before: () => { revealPanel('panel-results'); showTab('findings'); },
     body: `<p>Vegetation, fire and chlorophyll show an intensity level (Low → Severe).</p>
       <p>Floods are reported differently: <b>newly inundated area</b>, normal water, valid coverage and a separate <b>confidence</b> rating. If the satellites did not see enough, it says <b>Insufficient data</b>.</p>` },
-  { title: 'Use the timeline', target: panelHas('#panel-timeline'), before: () => revealPanel('panel-timeline'),
-    body: `<p>Ticks are real acquisitions in NASA’s catalogue; circles are analysed dates; squares are the pre-event baseline. Drag the slider or press play.</p>
-      <p>Tick <b>Show pre-event baseline</b> to compare water before and after the event on the map.</p>` },
+  { title: 'Use the event timeline', target: panelHas('#panel-timeline'), before: () => revealPanel('panel-timeline'),
+    body: `<p>The <b>event track</b> shows when each event happened according to the observations: solid = observed, hatched = the window in which the start or end must lie. ▲ marks the peak; dashed flags are officially reported dates.</p>
+      <p>Click a band, or use <b>Before / During / After</b>, to jump there – map, findings and chart follow. Below are the satellite tracks: ticks are acquisitions, circles analysed dates.</p>` },
   { title: 'Check data sources and export', target: panelHas('#panel-results'),
     before: () => { revealPanel('panel-results'); showTab('sources'); },
     body: `<p><b>Data sources</b> lists every NASA product used, its acquisitions, the classes read from it and anything excluded – with links to verify in Earthdata Search and Worldview.</p>
