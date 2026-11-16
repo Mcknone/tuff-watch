@@ -20,6 +20,7 @@ import { mergeByDate, detectEvent, phaseOf, phaseTargets, recordsInPeriod, daysB
 import { metricCircle, selfIntersects, ringAreaKm2, makeMetricGrid } from './geo.js';
 import { readWindow, sampleGranule, newTarget, decodeDist, decodeWater, valueHistogram, DIST_STATUS_NAMES } from './raster.js';
 import { classifyGesture } from './pointer.js';
+import { icon, hydrateIcons } from './icons.js';
 
 const $ = sel => document.querySelector(sel);
 // Area formatting never rounds a real detection to zero: one 30 m pixel is 0.0009 km².
@@ -189,7 +190,7 @@ function setPickMode(on) {
   if (on) $('#pick-add').focus();
 }
 $('#pick-btn').addEventListener('click', () => setPickMode(!picking));
-$('#pick-spot').addEventListener('click', () => { setPickMode(true); toast('Tap or click the map where you want to look 👆'); });
+$('#pick-spot').addEventListener('click', () => { setPickMode(true); toast('Click or tap the map where you want to look.'); });
 $('#pick-mode').addEventListener('click', () => setPickMode(!picking));
 $('#pick-add').addEventListener('click', () => addPointAt(map.getCenter()));
 $('#pick-undo').addEventListener('click', () => {
@@ -209,16 +210,15 @@ function addPointAt(lngLat) {
   if (state.simple) {
     // Simple mode: one tap = "look here" (a 10 km circle); the previous place is replaced
     $('#coord-body').innerHTML = '';
-    addRow(lat.toFixed(5), lng.toFixed(5));
-    $('#radius').value = 10;
-    state.loadedExample = null; markPlace(null); $('#examples').value = '';
+    addRow(lat.toFixed(5), lng.toFixed(5));       // the size slider's radius is kept
+    state.loadedExample = null; $('#examples').value = '';
     updateAoi(true);
     setPickMode(false);
     const el = document.createElement('div');
     el.className = 'point-pulse';
     const mk = new maplibregl.Marker({ element: el }).setLngLat([lng, lat]).addTo(map);
     setTimeout(() => mk.remove(), 1400);
-    toast('📍 Spot chosen! Now pick what to look for and press “Look from space!”');
+    toast('Spot chosen. Adjust the size if you like, then press “Look from space”.');
     return;
   }
   const filled = [...document.querySelectorAll('#coord-body tr')].filter(r => r.querySelector('.lat').value !== '' || r.querySelector('.lon').value !== '');
@@ -391,7 +391,7 @@ function readPoints() {
 function buildAoi() {
   const { pts, errors } = readPoints();
   if (errors.length) return { error: errors.join('\n') };
-  if (!pts.length) return { error: 'Add at least one coordinate.' };
+  if (!pts.length) return { error: 'Add at least one coordinate.', empty: true };
   let polygon, kind;
   if (pts.length === 1) {
     const km = parseFloat($('#radius').value);
@@ -424,9 +424,11 @@ async function updateAoi(fit) {
   const info = $('#aoi-info');
   const aoi = buildAoi();
   await mapReady;
+  syncSizeControl(aoi);
   if (aoi.error) {
-    info.className = 'aoi-info err';
-    info.textContent = aoi.error;
+    const none = aoi.empty;
+    info.className = none ? 'aoi-info none' : 'aoi-info err';
+    info.textContent = none ? 'No place chosen yet – choose a spot on the map.' : aoi.error;
     state.aoi = null;
     markOutdated('area');
     map.getSource('aoi').setData({ type: 'FeatureCollection', features: [] });
@@ -462,6 +464,24 @@ async function updateAoi(fit) {
 $('#add-row').addEventListener('click', () => addRow());
 $('#clear-rows').addEventListener('click', () => { $('#coord-body').innerHTML = ''; addRow(); updateAoi(false); });
 $('#radius').addEventListener('change', () => updateAoi(false));
+
+// ---- Simple mode: area size slider (radius of the circle around the chosen spot)
+function syncSizeControl(aoi) {
+  const r = +$('#radius').value || 10;
+  const slider = $('#size-range');
+  slider.value = Math.min(100, Math.max(1, Math.round(r)));
+  const single = aoi && !aoi.error && aoi.points.length === 1;
+  slider.disabled = !single;
+  $('#size-ctl').classList.toggle('off', !single);
+  $('#size-out').textContent = single
+    ? `${(2 * r).toLocaleString()} km across · about ${Math.round(Math.PI * r * r).toLocaleString()} km²`
+    : aoi && aoi.points && aoi.points.length > 1 ? 'Shape drawn in Detailed mode' : 'Choose a spot first';
+}
+$('#size-range').addEventListener('input', e => {
+  $('#radius').value = e.target.value;
+  updateAoi(false);
+});
+$('#size-range').addEventListener('change', () => updateAoi(true));      // zoom to the new size when released
 // changing the period, phenomena or sampling makes displayed results outdated
 for (const id of ['#start', '#end', '#event-date', '#samples', '#detail']) $(id).addEventListener('change', () => markOutdated(id === '#samples' || id === '#detail' ? 'settings' : 'period'));
 $('#phenomena').addEventListener('change', () => markOutdated('phenomena'));
@@ -475,7 +495,7 @@ function renderPhenomenaPicker(selected) {
     const main = ds.filter(d => !d.context).length, ctx = ds.length - main;
     return `<label class="phen" style="--c:${p.water ? p.water.new : p.ramp[2]};--k:${p.kid.color}">
       <input type="checkbox" value="${id}" ${selected.includes(id) ? 'checked' : ''}>
-      <span class="kid-emoji" aria-hidden="true">${p.kid.emoji}</span>
+      <span class="kid-emoji">${icon(p.kid.icon)}</span>
       <span class="ramp d-only" aria-hidden="true">${sw.map(c => `<i style="background:${c}"></i>`).join('')}</span>
       <span class="phen-text d-only">${p.name}<small>${main} NASA datasets${ctx ? ` + ${ctx} context` : ''} · ${kinds}</small></span>
       <span class="kid-name s-only">${p.kid.name}</span>
@@ -489,23 +509,8 @@ $('#examples').addEventListener('change', e => {
   if (e.target.value === '') return;
   loadExample(EXAMPLES[+e.target.value]);
 });
-function renderPlaces() {
-  $('#place-grid').innerHTML = EXAMPLES.map((ex, i) => `<button type="button" class="place" data-ex="${i}" aria-pressed="false">
-    <span class="place-emoji" aria-hidden="true">${ex.kid.emoji}</span><span class="place-title">${esc(ex.kid.title)}</span><small>${esc(ex.kid.place)}</small></button>`).join('');
-  $('#place-grid').querySelectorAll('.place').forEach(b => b.addEventListener('click', () => {
-    $('#examples').value = b.dataset.ex;
-    loadExample(EXAMPLES[+b.dataset.ex]);
-  }));
-}
-function markPlace(ex) {
-  document.querySelectorAll('#place-grid .place').forEach(b => {
-    const on = ex && EXAMPLES[+b.dataset.ex] === ex;
-    b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on));
-  });
-}
 function loadExample(ex) {
   state.loadedExample = ex;
-  markPlace(ex);
   $('#coord-body').innerHTML = '';
   ex.rows.forEach(([lat, lon]) => addRow(lat, lon));
   if (ex.radiusKm) $('#radius').value = ex.radiusKm;
@@ -521,7 +526,11 @@ $('#context').addEventListener('change', () => renderMapLayers());
 
 // ============================================================ analysis
 function setStatus(msg, isErr) { const s = $('#status'); s.textContent = msg; s.className = 'status d-only' + (isErr ? ' err' : ''); }
-function kidStatus(msg, tone = '') { const s = $('#status-simple'); s.textContent = msg; s.className = `status-simple s-only ${tone}`; }
+function kidStatus(msg, tone = '') {
+  const s = $('#status-simple');
+  s.innerHTML = `${icon({ ok: 'check', warn: 'alert', busy: 'satellite' }[tone] || 'globe')}<span>${esc(msg)}</span>`;
+  s.className = `status-simple s-only ${tone}`;
+}
 function setProgress(f) { $('#progress-bar').style.width = `${Math.round(f * 100)}%`; }
 
 $('#analyze').addEventListener('click', analyze);
@@ -537,7 +546,7 @@ function markOutdated(reason) {
   renderLegend();
   $('#export-csv').disabled = $('#export-json').disabled = true;
   setStatus(`Results outdated: ${what} changed. Run the analysis again.`, true);
-  kidStatus('🔄 You changed something – press “Look from space!” again.', 'warn');
+  kidStatus('You changed something – press “Look from space” again.', 'warn');
   renderFindings();
   renderMapLayers();
 }
@@ -578,7 +587,7 @@ async function analyze() {
   $('#analyze').disabled = true;
   setProgress(0.02);
   setStatus('Building analysis grids…');
-  kidStatus('🛰️ Asking the satellites for their pictures…', 'busy');
+  kidStatus('Asking the satellites for their pictures…', 'busy');
   const grid = makeGrid(state.aoi.polygon, state.aoi.bbox, detail);     // degree grid for imagery-based indicators
   const mgrid = makeMetricGrid(state.aoi.polygon);                        // 30 m UTM grid for product rasters
   const datasets = DATASETS.filter(d => phen.includes(d.phenomenon));
@@ -616,8 +625,8 @@ async function analyze() {
   const states = phen.map(pid => `${PHENOMENA[pid].short}: ${STATE_TEXT[phenomenonState(pid)]}`);
   const anyChange = phen.some(pid => phenomenonState(pid) === 'change');
   const anyError = phen.some(pid => /error/.test(phenomenonState(pid)));
-  if (!state.dates.length) kidStatus(anyError ? '⚠️ We couldn’t get the satellite pictures. Try again later.' : '☁️ No clear pictures for this place and time. Try other dates!', 'warn');
-  else kidStatus(anyChange ? '🎉 Done! Something changed – see what we found.' : '✅ Done! See what we found.', 'ok');
+  if (!state.dates.length) kidStatus(anyError ? 'We couldn’t get the satellite pictures. Try again later.' : 'No clear pictures for this place and time. Try other dates.', 'warn');
+  else kidStatus(anyChange ? 'Done – something changed. See what we found.' : 'Done – see what we found.', 'ok');
   if (!state.dates.length) {
     setStatus(`No usable NASA observations.\n${states.join('\n')}\nSee Data sources for each dataset's diagnostics.`, true);
     renderSources(); renderFindings(); buildTimeline();
@@ -1235,7 +1244,7 @@ function selectDate(idx) {
   if (ph) {
     const k = PHENOMENA[ev.phenomenon].kid;
     chip.textContent = state.simple
-      ? { before: `${k.emoji} Before`, during: `${k.emoji} During`, after: `${k.emoji} After`, uncertain: `${k.emoji} Can’t tell on this day` }[ph]
+      ? { before: `Before · ${k.name}`, during: `During · ${k.name}`, after: `After · ${k.name}`, uncertain: `Can’t tell on this day · ${k.name}` }[ph]
       : ph === 'uncertain' ? `${ev.title}: uncertain at this date` : `${ph[0].toUpperCase() + ph.slice(1)} ${ev.title.toLowerCase()}`;
     chip.title = ph === 'uncertain' ? 'This date lies in a window between observations, or after the last observation of an event whose end was not observed.' : '';
     chip.className = `phase-chip ph-${ph}`;
@@ -1380,10 +1389,10 @@ function eventTrackSvg(evs, g) {
     const col = ev.phenomenon === 'water' ? PHENOMENA.water.water.new : PHENOMENA[ev.phenomenon].ramp[2];
     const active = ev.id === state.activeEvent;
     const statusTxt = { detected: '', ongoing: ' · ongoing', insufficient: ' · uncertain', none: ' · none', 'no-data': ' · no data' }[ev.status];
-    const evLabel = state.simple ? `${PHENOMENA[ev.phenomenon].kid.emoji} ${PHENOMENA[ev.phenomenon].kid.name}` : ev.title;
+    const evLabel = state.simple ? PHENOMENA[ev.phenomenon].kid.name : ev.title;
     s += `<text x="6" y="${cy + 4}" font-size="11" fill="${C.ink}" ${active ? 'font-weight="600"' : ''}>${esc(evLabel)}<tspan fill="${C.text}" font-size="10">${state.simple ? '' : statusTxt}</tspan></text>`;
     if (ev.status === 'none' || ev.status === 'no-data') {
-      s += `<text x="${left + 4}" y="${cy + 4}" font-size="10" fill="${C.text}">${state.simple ? (ev.status === 'none' ? 'Nothing found 👍' : 'No pictures') : ev.status === 'none' ? 'Not detected in any valid observation' : 'No usable observations'}</text>`;
+      s += `<text x="${left + 4}" y="${cy + 4}" font-size="10" fill="${C.text}">${state.simple ? (ev.status === 'none' ? 'Nothing found' : 'No pictures') : ev.status === 'none' ? 'Not detected in any valid observation' : 'No usable observations'}</text>`;
       return;
     }
     const label = ev.status === 'insufficient'
@@ -1653,11 +1662,11 @@ function renderLegend() {
   const phen = state.results ? state.results.phen : selectedPhenomena();
   if (state.simple) {
     const items = [];
-    if (phen.includes('vegetation')) items.push([PHENOMENA.vegetation.ramp[3], '🌳 Damaged plants']);
-    if (phen.includes('water')) items.push([PHENOMENA.water.water.new, '🌊 New flood water'], [PHENOMENA.water.water.normal, '💧 Normal rivers & lakes']);
-    if (phen.includes('fire')) items.push([PHENOMENA.fire.ramp[2], '🔥 Fire']);
-    if (phen.includes('algae')) items.push([PHENOMENA.algae.ramp[2], '🦠 Algae']);
-    items.push(['#ff7a00', '📍 Your place']);
+    if (phen.includes('vegetation')) items.push([PHENOMENA.vegetation.ramp[3], 'Damaged plants']);
+    if (phen.includes('water')) items.push([PHENOMENA.water.water.new, 'New flood water'], [PHENOMENA.water.water.normal, 'Normal rivers & lakes']);
+    if (phen.includes('fire')) items.push([PHENOMENA.fire.ramp[2], 'Fire']);
+    if (phen.includes('algae')) items.push([PHENOMENA.algae.ramp[2], 'Algae']);
+    items.push(['#ff7a00', 'Your place']);
     setLegend(el, `${state.outdated ? '<div class="lg-note lg-warn">Out of date – press the button again.</div>' : ''}<div class="lg-kid">${items.map(([c, t]) => `<span><i class="sw" style="background:${c}"></i>${t}</span>`).join('')}</div>`);
     return;
   }
@@ -1718,11 +1727,11 @@ const stateChip = pid => { const st = phenomenonState(pid); return `<span class=
 const FIELD_KM2 = 0.00714;                      // one football pitch (105 m × 68 m)
 const KID_SAY = {
   change: { water: 'New flood water found!', vegetation: 'Some trees or plants were damaged.', fire: 'Fire spotted from space!', algae: 'Green algae spotted in the water.' },
-  'no-change': { water: 'No new flooding. 👍', vegetation: 'Plants look fine here. 👍', fire: 'No fires spotted. 👍', algae: 'The water looks clear. 👍' },
+  'no-change': { water: 'No new flooding.', vegetation: 'Plants look fine here.', fire: 'No fires spotted.', algae: 'The water looks clear.' },
   insufficient: 'Not enough clear pictures to tell (clouds, or the satellite didn’t pass by).',
   'data-error': 'We couldn’t get the satellite pictures right now.',
   'processing-error': 'Something went wrong reading the pictures.',
-  outdated: 'You changed something – press “Look from space!” again.'
+  outdated: 'You changed something – press “Look from space” again.'
 };
 const KID_PILL = { change: 'Changed', 'no-change': 'All clear', insufficient: 'Can’t tell', 'data-error': 'No pictures', 'processing-error': 'Oops', outdated: 'Out of date' };
 function kidAmount(pid, date) {
@@ -1732,14 +1741,14 @@ function kidAmount(pid, date) {
 }
 function fieldsText(km2) {
   const n = km2 / FIELD_KM2;
-  if (n < 1) return 'smaller than one football field ⚽';
-  return `about ${Math.round(n).toLocaleString()} football field${Math.round(n) === 1 ? '' : 's'} ⚽`;
+  if (n < 1) return 'smaller than one football field';
+  return `about ${Math.round(n).toLocaleString()} football field${Math.round(n) === 1 ? '' : 's'}`;
 }
 function kidFindings(date) {
   const res = state.results;
-  const place = state.loadedExample ? state.loadedExample.kid.title : 'your spot';
+  const place = state.loadedExample ? state.loadedExample.name.split(' – ')[0] : 'your spot';
   const head = state.outdated
-    ? `<div class="kid-banner">🔄 ${KID_SAY.outdated}</div>`
+    ? `<div class="kid-banner">${icon('refresh')}<span>${KID_SAY.outdated}</span></div>`
     : `<p class="kid-intro">Here’s what satellites saw at <b>${esc(place)}</b>${date ? ` on <b>${fmtDay(date)}</b>` : ''}.</p>`;
   const cards = res.phen.map(pid => {
     const p = PHENOMENA[pid], st = phenomenonState(pid);
@@ -1751,16 +1760,16 @@ function kidFindings(date) {
         more = `About <b>${fmtKm(km)} km²</b> ${what} – ${fieldsText(km)}.`;
       } else {
         say = 'Nothing yet on this day.';
-        more = 'Move the timeline below to see when it changed. ⏳';
+        more = 'Move the timeline below to see when it changed.';
       }
     }
     return `<article class="kid-card st-${st}" style="--k:${p.kid.color}">
-      <div class="kid-ico" aria-hidden="true">${p.kid.emoji}</div>
+      <div class="kid-ico">${icon(p.kid.icon)}</div>
       <div class="kid-body"><h3>${p.kid.name}<span class="kid-pill">${KID_PILL[st]}</span></h3>
         <p class="kid-say">${say}</p>${more ? `<p class="kid-more">${more}</p>` : ''}</div>
     </article>`;
   }).join('');
-  return head + kidWhen(date) + cards + `<p class="kid-foot">Want all the science? Switch to <button type="button" class="btn-link" data-mode-go="detailed">🔬 Detailed</button>.</p>`;
+  return head + kidWhen(date) + cards + `<p class="kid-foot">Want all the science? Switch to <button type="button" class="btn-link" data-mode-go="detailed">Detailed</button>.</p>`;
 }
 function kidWhen(date) {
   const ev = activeEvent();
@@ -1771,9 +1780,9 @@ function kidWhen(date) {
   const t = phaseTargets(ev, state.dates), ph = phaseOf(ev, date);
   const btn = (k, label) => `<button type="button" class="kid-phase ${ph === k ? 'on' : ''}" data-goto-ev="${ev.id}" data-phase="${k}" ${t[k] ? '' : 'disabled'}>${label}</button>`;
   return `<section class="kid-when" style="--k:${p.kid.color}">
-    <h3>📅 When did it happen?</h3>
-    <p>${p.kid.emoji} It started ${start}. ${end}</p>
-    <div class="kid-phases">${btn('before', '⏪ Before')}${btn('during', `${p.kid.emoji} During`)}${btn('after', '✅ After')}</div>
+    <h3>${icon('calendar')}When did it happen?</h3>
+    <p><span class="kid-dot"></span>${p.kid.name}: it started ${start}. ${end}</p>
+    <div class="kid-phases">${btn('before', 'Before')}${btn('during', 'During')}${btn('after', 'After')}</div>
   </section>`;
 }
 function wireKid(el) {
@@ -2230,7 +2239,7 @@ $('#tour-btn').addEventListener('click', startTour);
 (function init() {
   initLayout(() => { if (state.chart) state.chart.resize(); });
   initTerms();
-  renderPlaces();
+  hydrateIcons();
   let mode = 'simple';
   try { mode = localStorage.getItem('esm-mode') || 'simple'; } catch { /* ignore */ }
   setMode(mode);
@@ -2240,7 +2249,8 @@ $('#tour-btn').addEventListener('click', startTour);
   $('#end').value = end;
   $('#start').max = $('#end').max = end;
   renderPhenomenaPicker(['vegetation', 'water']);
-  loadExample(EXAMPLES[0]);
+  addRow();                       // no place chosen yet: the map stays on the whole globe
+  updateAoi(false);
   renderLegend();
   renderSources();
   fetch('/api/health').then(r => r.ok && $('#live-pill').classList.add('on')).catch(() => $('#live-pill').classList.add('err'));

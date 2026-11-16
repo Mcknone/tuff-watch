@@ -23,10 +23,10 @@
     </div>
     <div class="top-actions">
       <div class="mode-toggle" role="group" aria-label="How much information to show">
-        <button type="button" data-mode="simple" aria-pressed="true" title="Just the important answers – easy for everyone">✨ Simple</button>
-        <button type="button" data-mode="detailed" aria-pressed="false" title="All the scientific detail, data sources and settings">🔬 Detailed</button>
+        <button type="button" data-mode="simple" aria-pressed="true" title="Just the important answers – easy for everyone"><span data-icon="simple"></span>Simple</button>
+        <button type="button" data-mode="detailed" aria-pressed="false" title="All the scientific detail, data sources and settings"><span data-icon="detail"></span>Detailed</button>
       </div>
-      <button type="button" id="tour-btn" class="top-btn top-btn-primary"><span class="s-only">❓ Help</span><span class="d-only">How to use EarthScope</span></button>
+      <button type="button" id="tour-btn" class="top-btn top-btn-primary"><span class="s-only"><span data-icon="help"></span>Help</span><span class="d-only">How to use EarthScope</span></button>
       <button type="button" id="reset-layout" class="top-btn d-only" title="Put every panel back in its original place">Reset layout</button>
       <div class="live-pill d-only" id="live-pill" title="All imagery and catalogue data come from NASA services (GIBS imagery, CMR catalogue)">
         <span class="dot" aria-hidden="true"></span> NASA data · GIBS + CMR
@@ -40,15 +40,14 @@
       <!-- ========================= analysis setup panel ================= -->
       <section class="panel" id="panel-controls" data-panel="controls" data-default="left" aria-labelledby="h-controls">
         <header class="panel-head" title="Drag to move this panel to another side of the map">
-          <span class="grip" aria-hidden="true">⠿</span><h2 id="h-controls"><span class="d-only">Analysis setup</span><span class="s-only">Let’s explore 🚀</span></h2>
+          <span class="grip" aria-hidden="true">⠿</span><h2 id="h-controls"><span class="d-only">Analysis setup</span><span class="s-only">Explore</span></h2>
           <button type="button" class="p-btn p-move" title="Move panel to…" aria-label="Move Analysis setup panel" aria-haspopup="menu">⇆</button>
           <button type="button" class="p-btn p-collapse" title="Collapse panel" aria-label="Collapse Analysis setup panel" aria-expanded="true">–</button>
         </header>
         <div class="panel-body sidebar">
           <section class="card" id="card-aoi">
             <h3><span class="step">1</span> <span class="d-only"><span class="term" tabindex="0" data-term="AOI">Area of interest</span></span><span class="s-only">Where should we look?</span></h3>
-            <div class="s-only place-grid" id="place-grid"></div>
-            <button type="button" id="pick-spot" class="s-only spot-btn">📍 Pick my own spot on the map</button>
+            <button type="button" id="pick-spot" class="s-only spot-btn"><span data-icon="pin"></span>Choose a spot on the map</button>
             <p class="hint d-only">Latitude, longitude in decimal degrees. 1 point = circle · 2 = rectangle · 3+ = polygon.</p>
             <table class="coords d-only">
               <thead><tr><th>#</th><th>Latitude</th><th>Longitude</th><th><span class="sr-only">Remove</span></th></tr></thead>
@@ -62,6 +61,11 @@
             <label class="inline d-only">Radius for one point
               <input type="number" id="radius" value="10" min="0.5" max="500" step="0.5"> km</label>
             <div id="aoi-info" class="aoi-info" role="status"></div>
+            <div class="size-ctl s-only" id="size-ctl">
+              <label for="size-range"><span data-icon="resize"></span>Size of the area</label>
+              <input type="range" id="size-range" min="1" max="100" step="1" value="10" aria-describedby="size-out">
+              <span id="size-out" class="size-out">20 km across</span>
+            </div>
             <label class="inline d-only">Example
               <select id="examples"><option value="">Load a documented event…</option></select></label>
           </section>
@@ -122,7 +126,7 @@
           </section>
 
           <div class="run-box">
-            <button id="analyze" class="primary" type="button"><span class="d-only">Analyse with NASA data</span><span class="s-only">🛰️ Look from space!</span></button>
+            <button id="analyze" class="primary" type="button"><span class="d-only">Analyse with NASA data</span><span class="s-only"><span data-icon="satellite"></span>Look from space</span></button>
             <div class="progress" aria-hidden="true"><div id="progress-bar"></div></div>
             <div id="status" class="status d-only" role="status" aria-live="polite"></div>
             <div id="status-simple" class="status-simple s-only" role="status" aria-live="polite"></div>
@@ -177,7 +181,7 @@
       <!-- ========================= timeline panel ================= -->
       <section class="panel" id="panel-timeline" data-panel="timeline" data-default="bottom" aria-labelledby="h-timeline">
         <header class="panel-head" title="Drag to move this panel to another side of the map">
-          <span class="grip" aria-hidden="true">⠿</span><h2 id="h-timeline"><span class="d-only">Timeline</span><span class="s-only">Travel through time ⏳</span></h2>
+          <span class="grip" aria-hidden="true">⠿</span><h2 id="h-timeline"><span class="d-only">Timeline</span><span class="s-only">Through time</span></h2>
           <button type="button" class="p-btn p-move" title="Move panel to…" aria-label="Move Timeline panel" aria-haspopup="menu">⇆</button>
           <button type="button" class="p-btn p-collapse" title="Collapse panel" aria-label="Collapse Timeline panel" aria-expanded="true">–</button>
         </header>
@@ -209,7 +213,7 @@
       <!-- ========================= results panel ========================= -->
       <section class="panel" id="panel-results" data-panel="results" data-default="right" aria-labelledby="h-results">
         <header class="panel-head" title="Drag to move this panel to another side of the map">
-          <span class="grip" aria-hidden="true">⠿</span><h2 id="h-results"><span class="d-only">Results</span><span class="s-only">What we found 🔎</span></h2>
+          <span class="grip" aria-hidden="true">⠿</span><h2 id="h-results"><span class="d-only">Results</span><span class="s-only">What we found</span></h2>
           <button type="button" class="p-btn p-move" title="Move panel to…" aria-label="Move Results panel" aria-haspopup="menu">⇆</button>
           <button type="button" class="p-btn p-collapse" title="Collapse panel" aria-label="Collapse Results panel" aria-expanded="true">–</button>
         </header>
@@ -220,9 +224,9 @@
           </div>
           <div id="findings" class="tab-panel" role="tabpanel">
             <div class="empty s-only kid-empty">
-              <div class="kid-hero" aria-hidden="true">🛰️🌍</div>
-              <p><b>Satellites take pictures of Earth every day.</b></p>
-              <p>Pick a place, choose what to look for, and press <b>Look from space!</b> We’ll tell you what changed.</p>
+              <div class="kid-hero" aria-hidden="true"><span data-icon="globe"></span></div>
+              <p><b>Satellites photograph Earth every day.</b></p>
+              <p>Choose a spot on the map, pick what to look for and press <b>Look from space</b>. We’ll tell you what changed.</p>
             </div>
             <div class="empty d-only">
               <p><b>How it works</b></p>

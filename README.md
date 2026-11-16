@@ -7,12 +7,13 @@ satellite data**. Runs on **Cloudflare Workers**, no Google Earth Engine needed.
 ## What it does
 
 **Two views – switch any time in the top bar:**
-- **✨ Simple** (default): made so that anyone, including children, can use it. Pick one of four
-  picture cards or tap your own spot on the map, choose what to look for (🌳 🌊 🔥 🦠), press
-  **Look from space!** and read one plain sentence per topic (“New flood water found! About 9.4 km² –
-  about 1,300 football fields”), plus *when* it happened with **Before / During / After** buttons.
-  Coordinates, settings, charts, satellite tracks, data sources and exports are hidden.
-- **🔬 Detailed**: everything described below – coordinates, sensitivity settings, charts, satellite
+- **Simple** (default): made so that anyone can use it. The app opens on the whole globe; choose a
+  spot on the map, set the **size of the area** with a slider, pick what to look for (forests &
+  plants, floods, fires, algae – shown with small line icons), press **Look from space** and read one
+  plain sentence per topic (“New flood water found! About 9.4 km² – about 1,300 football fields”),
+  plus *when* it happened with **Before / During / After** buttons. Coordinates, example presets,
+  settings, charts, satellite tracks, data sources and exports are hidden.
+- **Detailed**: everything described below – coordinates, sensitivity settings, charts, satellite
   tracks, diagnostics and downloads. The same analysis powers both views.
 
 
