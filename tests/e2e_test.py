@@ -149,11 +149,27 @@ with sync_playwright() as p:
     sp.wait_for_timeout(800)
     R['s_default'] = sp.evaluate("document.body.classList.contains('simple')")
     R['s_hidden'] = [sp.is_visible(sel) for sel in ['#coord-body', '#examples', '.tabs', '#export-csv', '#veg-loss', '#event-date', '#context', '#reset-layout']]
-    R['s_places'] = sp.locator('#place-grid .place').count()
-    sp.click('#place-grid .place[data-ex="0"]'); sp.wait_for_timeout(200)
-    R['s_place_on'] = sp.get_attribute('#place-grid .place[data-ex="0"]', 'aria-pressed')
+    # start-up: whole globe, no place chosen, no preset places
+    R['s_start'] = (sp.evaluate("window.__map.fit === undefined"), sp.inner_text('#aoi-info'), sp.locator('.place').count(), sp.is_disabled('#size-range'))
+    # choose a spot by tapping the map (Merauke test fixtures: lon 140.4, lat -8.3)
+    mbox = sp.eval_on_selector('#map', 'e => { const r = e.getBoundingClientRect(); return [r.left, r.top]; }')
+    tx, ty = mbox[0] + 400, mbox[1] + 300
+    sp.click('#pick-spot')
+    for kind in ('pointerdown', 'pointerup'):
+        sp.dispatch_event('#map', kind, {'button': 0, 'pointerId': 1, 'pointerType': 'touch', 'clientX': tx, 'clientY': ty, 'isPrimary': True})
+    sp.wait_for_timeout(200)
+    R['s_chosen'] = (sp.locator('#coord-body .lat').first.input_value(), sp.locator('#coord-body .lon').first.input_value(), sp.inner_text('#aoi-info'))
+    # resize the area with the slider
+    sp.evaluate("const r=document.querySelector('#size-range'); r.value=15; r.dispatchEvent(new Event('input')); r.dispatchEvent(new Event('change'))")
+    sp.wait_for_timeout(150)
+    R['s_size15'] = (sp.inner_text('#aoi-info'), sp.inner_text('#size-out'), sp.input_value('#radius'))
+    sp.evaluate("const r=document.querySelector('#size-range'); r.value=10; r.dispatchEvent(new Event('input')); r.dispatchEvent(new Event('change'))")
+    sp.wait_for_timeout(150)
+    sp.fill('#start', '2026-05-01'); sp.fill('#end', '2026-11-10')
+    sp.check('#phenomena input[value=fire]')
     sp.click('#analyze')
     sp.wait_for_function("document.querySelector('#analyze').disabled === false && /Done|couldn|No clear/.test(document.querySelector('#status-simple').textContent)", timeout=90000)
+    R['s_panel_text'] = sp.inner_text('#panel-controls') + sp.inner_text('#panel-timeline') + sp.inner_text('#legend') + sp.inner_text('header.topbar')
     sp.wait_for_timeout(300)
     R['s_status'] = sp.inner_text('#status-simple')
     R['s_findings'] = sp.inner_text('#findings')
@@ -175,6 +191,8 @@ with sync_playwright() as p:
     page.wait_for_timeout(800)
 
     # ---------------------------------------------------------------- A. inputs
+    R['d_start_empty'] = page.locator('#coord-body .lat').first.input_value() == '' and 'No place chosen' in page.inner_text('#aoi-info')
+    page.select_option('#examples', '0'); page.wait_for_timeout(300)
     assert rows(page) == 1, 'example row loaded'
     R['area0'] = page.inner_text('#aoi-info')
     page.fill('#coord-body tr .lat', '95'); page.dispatch_event('#coord-body tr .lat', 'change'); page.wait_for_timeout(100)
@@ -402,7 +420,12 @@ assert R['pal_outdated']
 assert 'Containment' not in R['fire_card2'] and 'Reported' in R['fire_card2']
 # S. simple mode: the default; technical controls hidden; plain-language answers
 assert R['s_default'] and not any(R['s_hidden']), R['s_hidden']
-assert R['s_places'] == 4 and R['s_place_on'] == 'true'
+assert R['s_start'] == (True, 'No place chosen yet – choose a spot on the map.', 0, True), R['s_start']
+assert R['s_chosen'][:2] == ('-8.30000', '140.40000') and '(circle, 10 km radius)' in R['s_chosen'][2], R['s_chosen']
+assert '(circle, 15 km radius)' in R['s_size15'][0] and R['s_size15'][1].startswith('30 km across') and R['s_size15'][2] == '15'
+EMOJI = re.compile('[\U0001F300-\U0001FAFF\u2600-\u27BF\u23E9-\u23FA]')
+assert not EMOJI.search(R['s_findings'] + R['s_panel_text'] + R['s_legend']), EMOJI.findall(R['s_findings'] + R['s_panel_text'])
+assert R['d_start_empty']
 assert 'Done' in R['s_status']
 assert 'New flood water found!' in R['s_findings'] and 'football field' in R['s_findings'] and 'When did it happen?' in R['s_findings']
 assert 'Some trees or plants were damaged.' in R['s_findings']

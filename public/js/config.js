@@ -21,7 +21,7 @@ export const PHENOMENA = {
     // cause (clearing, fire, drought, harvest, flooding…), so it is not called deforestation.
     name: 'Vegetation disturbance / loss',
     short: 'Vegetation disturbance',
-    kid: { emoji: '🌳', name: 'Forests & plants', color: '#16a34a' },
+    kid: { icon: 'plant', name: 'Forests & plants', color: '#16a34a' },
     priority: 2,
     categorical: true,
     ramp: ['#fdd0a2', '#fd8d3c', '#d94801', '#7f2704'],
@@ -37,7 +37,7 @@ export const PHENOMENA = {
   water: {
     name: 'Flooding / surface water',
     short: 'Surface water',
-    kid: { emoji: '🌊', name: 'Floods', color: '#0284c7' },
+    kid: { icon: 'water', name: 'Floods', color: '#0284c7' },
     priority: 3,
     categorical: true,          // water is reported as extent + confidence, never as an intensity level
     // ramp kept for chart/timeline colour only: [normal water, new water, …]
@@ -53,7 +53,7 @@ export const PHENOMENA = {
   fire: {
     name: 'Active fires / burning',
     short: 'Fire',
-    kid: { emoji: '🔥', name: 'Fires', color: '#ef4444' },
+    kid: { icon: 'fire', name: 'Fires', color: '#ef4444' },
     priority: 4,
     ramp: ['#fa9fb5', '#f768a1', '#c51b8a', '#7a0177'],
     levelHelp: [
@@ -66,7 +66,7 @@ export const PHENOMENA = {
   algae: {
     name: 'Algae bloom / chlorophyll',
     short: 'Chlorophyll',
-    kid: { emoji: '🦠', name: 'Green algae in water', color: '#65a30d' },
+    kid: { icon: 'algae', name: 'Algae in water', color: '#65a30d' },
     priority: 1,
     ramp: ['#c2e699', '#78c679', '#31a354', '#005a32'],
     levelHelp: [
@@ -319,14 +319,12 @@ export const CONTEXT_LAYERS = [
 export const EXAMPLES = [
   {
     name: 'South Papua (Merauke) – forest clearing 2026',
-    kid: { emoji: '🌴', title: 'Rainforest in Papua', place: 'Indonesia' },
     rows: [[-8.30, 140.40]], radiusKm: 10,
     start: '2026-05-01', end: '2026-11-10',
     phenomena: ['vegetation', 'water', 'fire']
   },
   {
     name: 'Texas Hill Country floods – July 2025',
-    kid: { emoji: '🌊', title: 'Texas river flood', place: 'USA, July 2025' },
     rows: [[29.95, -99.40], [30.15, -99.05]],
     start: '2025-06-15', end: '2025-07-25', eventDate: '2025-07-04',
     phenomena: ['water'],
@@ -338,7 +336,6 @@ export const EXAMPLES = [
   },
   {
     name: 'Palisades fire, Los Angeles – January 2025',
-    kid: { emoji: '🔥', title: 'Los Angeles wildfire', place: 'USA, January 2025' },
     rows: [[34.02, -118.68], [34.13, -118.48]],
     start: '2024-12-15', end: '2025-02-28',
     phenomena: ['fire', 'vegetation'],
@@ -351,7 +348,6 @@ export const EXAMPLES = [
   },
   {
     name: 'Lake Erie algae bloom – summer 2025',
-    kid: { emoji: '🦠', title: 'Green lake water', place: 'Lake Erie, USA' },
     rows: [[41.40, -83.50], [41.95, -82.70]],
     start: '2025-06-01', end: '2025-09-30',
     phenomena: ['algae']
