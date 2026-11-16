@@ -6,6 +6,16 @@ satellite data**. Runs on **Cloudflare Workers**, no Google Earth Engine needed.
 
 ## What it does
 
+**Two views – switch any time in the top bar:**
+- **✨ Simple** (default): made so that anyone, including children, can use it. Pick one of four
+  picture cards or tap your own spot on the map, choose what to look for (🌳 🌊 🔥 🦠), press
+  **Look from space!** and read one plain sentence per topic (“New flood water found! About 9.4 km² –
+  about 1,300 football fields”), plus *when* it happened with **Before / During / After** buttons.
+  Coordinates, settings, charts, satellite tracks, data sources and exports are hidden.
+- **🔬 Detailed**: everything described below – coordinates, sensitivity settings, charts, satellite
+  tracks, diagnostics and downloads. The same analysis powers both views.
+
+
 1. **Coordinates table** – type latitude/longitude (1 point = circle, 2 = rectangle, 3+ = polygon)
    or add points on the map: middle-click, or **Add point** mode (a crosshair at the map centre plus an
    explicit *Add point here* button – for touchpads and touch screens). A normal left click or tap

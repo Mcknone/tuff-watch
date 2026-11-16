@@ -8,11 +8,11 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='11' fill='%23111c2b'/><ellipse cx='16' cy='16' rx='15' ry='5' fill='none' stroke='%234f9bd9' stroke-width='2' transform='rotate(-25 16 16)'/></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
   <link rel="stylesheet" href="css/style.css">
 </head>
-<body>
+<body class="simple">
   <header class="topbar">
     <div class="brand">
       <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="10" fill="#1e3550"/><ellipse cx="16" cy="16" rx="15" ry="5" fill="none" stroke="#5aa4e0" stroke-width="1.6" transform="rotate(-25 16 16)"/></svg>
@@ -22,9 +22,13 @@
       </div>
     </div>
     <div class="top-actions">
-      <button type="button" id="tour-btn" class="top-btn top-btn-primary">How to use EarthScope</button>
-      <button type="button" id="reset-layout" class="top-btn" title="Put every panel back in its original place">Reset layout</button>
-      <div class="live-pill" id="live-pill" title="All imagery and catalogue data come from NASA services (GIBS imagery, CMR catalogue)">
+      <div class="mode-toggle" role="group" aria-label="How much information to show">
+        <button type="button" data-mode="simple" aria-pressed="true" title="Just the important answers – easy for everyone">✨ Simple</button>
+        <button type="button" data-mode="detailed" aria-pressed="false" title="All the scientific detail, data sources and settings">🔬 Detailed</button>
+      </div>
+      <button type="button" id="tour-btn" class="top-btn top-btn-primary"><span class="s-only">❓ Help</span><span class="d-only">How to use EarthScope</span></button>
+      <button type="button" id="reset-layout" class="top-btn d-only" title="Put every panel back in its original place">Reset layout</button>
+      <div class="live-pill d-only" id="live-pill" title="All imagery and catalogue data come from NASA services (GIBS imagery, CMR catalogue)">
         <span class="dot" aria-hidden="true"></span> NASA data · GIBS + CMR
       </div>
     </div>
@@ -36,43 +40,45 @@
       <!-- ========================= analysis setup panel ================= -->
       <section class="panel" id="panel-controls" data-panel="controls" data-default="left" aria-labelledby="h-controls">
         <header class="panel-head" title="Drag to move this panel to another side of the map">
-          <span class="grip" aria-hidden="true">⠿</span><h2 id="h-controls">Analysis setup</h2>
+          <span class="grip" aria-hidden="true">⠿</span><h2 id="h-controls"><span class="d-only">Analysis setup</span><span class="s-only">Let’s explore 🚀</span></h2>
           <button type="button" class="p-btn p-move" title="Move panel to…" aria-label="Move Analysis setup panel" aria-haspopup="menu">⇆</button>
           <button type="button" class="p-btn p-collapse" title="Collapse panel" aria-label="Collapse Analysis setup panel" aria-expanded="true">–</button>
         </header>
         <div class="panel-body sidebar">
           <section class="card" id="card-aoi">
-            <h3><span class="step">1</span> <span class="term" tabindex="0" data-term="AOI">Area of interest</span></h3>
-            <p class="hint">Latitude, longitude in decimal degrees. 1 point = circle · 2 = rectangle · 3+ = polygon.</p>
-            <table class="coords">
+            <h3><span class="step">1</span> <span class="d-only"><span class="term" tabindex="0" data-term="AOI">Area of interest</span></span><span class="s-only">Where should we look?</span></h3>
+            <div class="s-only place-grid" id="place-grid"></div>
+            <button type="button" id="pick-spot" class="s-only spot-btn">📍 Pick my own spot on the map</button>
+            <p class="hint d-only">Latitude, longitude in decimal degrees. 1 point = circle · 2 = rectangle · 3+ = polygon.</p>
+            <table class="coords d-only">
               <thead><tr><th>#</th><th>Latitude</th><th>Longitude</th><th><span class="sr-only">Remove</span></th></tr></thead>
               <tbody id="coord-body"></tbody>
             </table>
-            <div class="row-buttons">
+            <div class="row-buttons d-only">
               <button id="add-row" type="button" class="btn">Add point</button>
               <button id="clear-rows" type="button" class="btn btn-quiet">Clear</button>
               <button type="button" id="pick-mode" class="btn btn-quiet pick-link" aria-pressed="false" title="Add-point mode: click the map (or use the crosshair) to add points">Pick on map</button>
             </div>
-            <label class="inline">Radius for one point
+            <label class="inline d-only">Radius for one point
               <input type="number" id="radius" value="10" min="0.5" max="500" step="0.5"> km</label>
             <div id="aoi-info" class="aoi-info" role="status"></div>
-            <label class="inline">Example
+            <label class="inline d-only">Example
               <select id="examples"><option value="">Load a documented event…</option></select></label>
           </section>
 
           <section class="card" id="card-time">
-            <h3><span class="step">2</span> Time period</h3>
+            <h3><span class="step">2</span> <span class="d-only">Time period</span><span class="s-only">When?</span></h3>
             <div class="dates">
               <label>From <input type="date" id="start"></label>
               <label>To <input type="date" id="end"></label>
             </div>
-            <div class="dates one">
+            <div class="dates one d-only">
               <label><span>Flood event date <span class="opt">optional</span>
                 <span class="term" tabindex="0" data-term="baseline" aria-label="What is the pre-event baseline?">ⓘ</span></span>
                 <input type="date" id="event-date"></label>
             </div>
-            <p class="hint">Observations before this date form the pre-event water baseline. Leave empty to use the first well-covered observation.</p>
-            <div class="dates">
+            <p class="hint d-only">Observations before this date form the pre-event water baseline. Leave empty to use the first well-covered observation.</p>
+            <div class="dates d-only">
               <label>Dates per dataset
                 <select id="samples">
                   <option value="4">4 (fast)</option>
@@ -90,9 +96,9 @@
           </section>
 
           <section class="card" id="card-phen">
-            <h3><span class="step">3</span> Phenomena</h3>
+            <h3><span class="step">3</span> <span class="d-only">Phenomena</span><span class="s-only">What should we look for?</span></h3>
             <div id="phenomena" class="phenomena"></div>
-            <fieldset class="sens">
+            <fieldset class="sens d-only">
               <legend>Vegetation disturbance sensitivity <span class="term" tabindex="0" data-term="sensitivity" aria-label="About these settings">ⓘ</span></legend>
               <label>Minimum vegetation-cover loss per pixel
                 <select id="veg-loss">
@@ -116,9 +122,10 @@
           </section>
 
           <div class="run-box">
-            <button id="analyze" class="primary" type="button">Analyse with NASA data</button>
+            <button id="analyze" class="primary" type="button"><span class="d-only">Analyse with NASA data</span><span class="s-only">🛰️ Look from space!</span></button>
             <div class="progress" aria-hidden="true"><div id="progress-bar"></div></div>
-            <div id="status" class="status" role="status" aria-live="polite"></div>
+            <div id="status" class="status d-only" role="status" aria-live="polite"></div>
+            <div id="status-simple" class="status-simple s-only" role="status" aria-live="polite"></div>
           </div>
         </div>
       </section>
@@ -129,16 +136,16 @@
     <section class="map-wrap" id="map-wrap" aria-label="Map">
       <div id="map"></div>
       <div class="map-tools">
-        <div class="seg" role="group" aria-label="Map view">
+        <div class="seg d-only" role="group" aria-label="Map view">
           <button type="button" data-view="classified" class="on" aria-pressed="true" title="This app's classification of NASA data">Analysed</button>
           <button type="button" data-view="original" aria-pressed="false" title="NASA's own visualisation of the products">NASA original</button>
         </div>
-        <select id="basemap" title="Base map" aria-label="Base map">
+        <select id="basemap" class="d-only" title="Base map" aria-label="Base map">
           <option value="hybrid">Satellite + labels</option>
           <option value="esri">Satellite</option>
           <option value="osm">Street map</option>
         </select>
-        <select id="context" title="NASA context imagery at the selected date" aria-label="Context imagery">
+        <select id="context" class="d-only" title="NASA context imagery at the selected date" aria-label="Context imagery">
           <option value="">No context imagery</option>
         </select>
         <div class="globe-tools" role="group" aria-label="Globe settings">
@@ -146,8 +153,8 @@
             <button type="button" data-proj="globe" class="on" title="3D globe">Globe</button>
             <button type="button" data-proj="mercator" title="Flat map">Flat</button>
           </div>
-          <label class="chk" title="Show latitude and longitude lines"><input type="checkbox" id="graticule"> Lat/Lon grid</label>
-          <label class="chk" title="Show relief in 3D (tilt with right-drag)"><input type="checkbox" id="terrain"> 3D terrain</label>
+          <label class="chk d-only" title="Show latitude and longitude lines"><input type="checkbox" id="graticule"> Lat/Lon grid</label>
+          <label class="chk d-only" title="Show relief in 3D (tilt with right-drag)"><input type="checkbox" id="terrain"> 3D terrain</label>
           <button type="button" id="pick-btn" class="tool-btn" aria-pressed="false" title="Add-point mode: a normal click or tap adds one point; or move the map under the crosshair and press “Add point here”">Add point</button>
         </div>
       </div>
@@ -170,7 +177,7 @@
       <!-- ========================= timeline panel ================= -->
       <section class="panel" id="panel-timeline" data-panel="timeline" data-default="bottom" aria-labelledby="h-timeline">
         <header class="panel-head" title="Drag to move this panel to another side of the map">
-          <span class="grip" aria-hidden="true">⠿</span><h2 id="h-timeline">Timeline</h2>
+          <span class="grip" aria-hidden="true">⠿</span><h2 id="h-timeline"><span class="d-only">Timeline</span><span class="s-only">Travel through time ⏳</span></h2>
           <button type="button" class="p-btn p-move" title="Move panel to…" aria-label="Move Timeline panel" aria-haspopup="menu">⇆</button>
           <button type="button" class="p-btn p-collapse" title="Collapse panel" aria-label="Collapse Timeline panel" aria-expanded="true">–</button>
         </header>
@@ -188,12 +195,12 @@
                 <button type="button" data-phase="after">After</button>
               </div>
             </div>
-            <label class="toggle" id="baseline-toggle" hidden title="Show the pre-event water baseline on the map to compare with the selected date">
+            <label class="toggle d-only" id="baseline-toggle" hidden title="Show the pre-event water baseline on the map to compare with the selected date">
               <input type="checkbox" id="show-baseline"> Show pre-event baseline</label>
           </div>
           <div class="tl-body">
             <div class="tl-svg-box"><svg id="tl-svg" role="img" aria-label="Acquisition timeline"></svg></div>
-            <div class="chart-box"><canvas id="chart" aria-label="Detected area over time"></canvas></div>
+            <div class="chart-box d-only"><canvas id="chart" aria-label="Detected area over time"></canvas></div>
           </div>
         </div>
       </section>
@@ -202,17 +209,22 @@
       <!-- ========================= results panel ========================= -->
       <section class="panel" id="panel-results" data-panel="results" data-default="right" aria-labelledby="h-results">
         <header class="panel-head" title="Drag to move this panel to another side of the map">
-          <span class="grip" aria-hidden="true">⠿</span><h2 id="h-results">Results</h2>
+          <span class="grip" aria-hidden="true">⠿</span><h2 id="h-results"><span class="d-only">Results</span><span class="s-only">What we found 🔎</span></h2>
           <button type="button" class="p-btn p-move" title="Move panel to…" aria-label="Move Results panel" aria-haspopup="menu">⇆</button>
           <button type="button" class="p-btn p-collapse" title="Collapse panel" aria-label="Collapse Results panel" aria-expanded="true">–</button>
         </header>
         <div class="panel-body results">
-          <div class="tabs" role="tablist">
+          <div class="tabs d-only" role="tablist">
             <button type="button" class="on" role="tab" aria-selected="true" data-tab="findings">Findings</button>
             <button type="button" role="tab" aria-selected="false" data-tab="sources">Data sources</button>
           </div>
           <div id="findings" class="tab-panel" role="tabpanel">
-            <div class="empty">
+            <div class="empty s-only kid-empty">
+              <div class="kid-hero" aria-hidden="true">🛰️🌍</div>
+              <p><b>Satellites take pictures of Earth every day.</b></p>
+              <p>Pick a place, choose what to look for, and press <b>Look from space!</b> We’ll tell you what changed.</p>
+            </div>
+            <div class="empty d-only">
               <p><b>How it works</b></p>
               <ol>
                 <li>Enter coordinates or load an example.</li>
@@ -224,7 +236,7 @@
             </div>
           </div>
           <div id="sources" class="tab-panel hidden" role="tabpanel"></div>
-          <div class="exports">
+          <div class="exports d-only">
             <button type="button" id="export-csv" class="btn" disabled>Download CSV</button>
             <button type="button" id="export-json" class="btn" disabled>Download JSON</button>
           </div>

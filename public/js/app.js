@@ -189,6 +189,7 @@ function setPickMode(on) {
   if (on) $('#pick-add').focus();
 }
 $('#pick-btn').addEventListener('click', () => setPickMode(!picking));
+$('#pick-spot').addEventListener('click', () => { setPickMode(true); toast('Tap or click the map where you want to look 👆'); });
 $('#pick-mode').addEventListener('click', () => setPickMode(!picking));
 $('#pick-add').addEventListener('click', () => addPointAt(map.getCenter()));
 $('#pick-undo').addEventListener('click', () => {
@@ -205,6 +206,21 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && picking) {
 function addPointAt(lngLat) {
   const lng = ((lngLat.lng + 540) % 360) - 180, lat = lngLat.lat;
   if (!(lat >= -90 && lat <= 90) || !Number.isFinite(lng)) { toast('Invalid location – no point added.'); return; }
+  if (state.simple) {
+    // Simple mode: one tap = "look here" (a 10 km circle); the previous place is replaced
+    $('#coord-body').innerHTML = '';
+    addRow(lat.toFixed(5), lng.toFixed(5));
+    $('#radius').value = 10;
+    state.loadedExample = null; markPlace(null); $('#examples').value = '';
+    updateAoi(true);
+    setPickMode(false);
+    const el = document.createElement('div');
+    el.className = 'point-pulse';
+    const mk = new maplibregl.Marker({ element: el }).setLngLat([lng, lat]).addTo(map);
+    setTimeout(() => mk.remove(), 1400);
+    toast('📍 Spot chosen! Now pick what to look for and press “Look from space!”');
+    return;
+  }
   const filled = [...document.querySelectorAll('#coord-body tr')].filter(r => r.querySelector('.lat').value !== '' || r.querySelector('.lon').value !== '');
   const prev = filled.at(-1);
   if (prev && Math.abs(+prev.querySelector('.lat').value - lat) < 1e-5 && Math.abs(+prev.querySelector('.lon').value - lng) < 1e-5) {
@@ -457,10 +473,12 @@ function renderPhenomenaPicker(selected) {
     const kinds = [...new Set(ds.map(d => d.kind))].join(' + ');
     const sw = p.water ? [p.water.normal, p.water.new] : p.ramp;
     const main = ds.filter(d => !d.context).length, ctx = ds.length - main;
-    return `<label class="phen" style="--c:${p.water ? p.water.new : p.ramp[2]}">
+    return `<label class="phen" style="--c:${p.water ? p.water.new : p.ramp[2]};--k:${p.kid.color}">
       <input type="checkbox" value="${id}" ${selected.includes(id) ? 'checked' : ''}>
-      <span class="ramp" aria-hidden="true">${sw.map(c => `<i style="background:${c}"></i>`).join('')}</span>
-      <span class="phen-text">${p.name}<small>${main} NASA datasets${ctx ? ` + ${ctx} context` : ''} · ${kinds}</small></span>
+      <span class="kid-emoji" aria-hidden="true">${p.kid.emoji}</span>
+      <span class="ramp d-only" aria-hidden="true">${sw.map(c => `<i style="background:${c}"></i>`).join('')}</span>
+      <span class="phen-text d-only">${p.name}<small>${main} NASA datasets${ctx ? ` + ${ctx} context` : ''} · ${kinds}</small></span>
+      <span class="kid-name s-only">${p.kid.name}</span>
     </label>`;
   }).join('');
 }
@@ -471,8 +489,23 @@ $('#examples').addEventListener('change', e => {
   if (e.target.value === '') return;
   loadExample(EXAMPLES[+e.target.value]);
 });
+function renderPlaces() {
+  $('#place-grid').innerHTML = EXAMPLES.map((ex, i) => `<button type="button" class="place" data-ex="${i}" aria-pressed="false">
+    <span class="place-emoji" aria-hidden="true">${ex.kid.emoji}</span><span class="place-title">${esc(ex.kid.title)}</span><small>${esc(ex.kid.place)}</small></button>`).join('');
+  $('#place-grid').querySelectorAll('.place').forEach(b => b.addEventListener('click', () => {
+    $('#examples').value = b.dataset.ex;
+    loadExample(EXAMPLES[+b.dataset.ex]);
+  }));
+}
+function markPlace(ex) {
+  document.querySelectorAll('#place-grid .place').forEach(b => {
+    const on = ex && EXAMPLES[+b.dataset.ex] === ex;
+    b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on));
+  });
+}
 function loadExample(ex) {
   state.loadedExample = ex;
+  markPlace(ex);
   $('#coord-body').innerHTML = '';
   ex.rows.forEach(([lat, lon]) => addRow(lat, lon));
   if (ex.radiusKm) $('#radius').value = ex.radiusKm;
@@ -487,7 +520,8 @@ CONTEXT_LAYERS.forEach(c => $('#context').insertAdjacentHTML('beforeend', `<opti
 $('#context').addEventListener('change', () => renderMapLayers());
 
 // ============================================================ analysis
-function setStatus(msg, isErr) { const s = $('#status'); s.textContent = msg; s.className = 'status' + (isErr ? ' err' : ''); }
+function setStatus(msg, isErr) { const s = $('#status'); s.textContent = msg; s.className = 'status d-only' + (isErr ? ' err' : ''); }
+function kidStatus(msg, tone = '') { const s = $('#status-simple'); s.textContent = msg; s.className = `status-simple s-only ${tone}`; }
 function setProgress(f) { $('#progress-bar').style.width = `${Math.round(f * 100)}%`; }
 
 $('#analyze').addEventListener('click', analyze);
@@ -503,6 +537,8 @@ function markOutdated(reason) {
   renderLegend();
   $('#export-csv').disabled = $('#export-json').disabled = true;
   setStatus(`Results outdated: ${what} changed. Run the analysis again.`, true);
+  kidStatus('🔄 You changed something – press “Look from space!” again.', 'warn');
+  renderFindings();
   renderMapLayers();
 }
 function markBanners() {
@@ -542,6 +578,7 @@ async function analyze() {
   $('#analyze').disabled = true;
   setProgress(0.02);
   setStatus('Building analysis grids…');
+  kidStatus('🛰️ Asking the satellites for their pictures…', 'busy');
   const grid = makeGrid(state.aoi.polygon, state.aoi.bbox, detail);     // degree grid for imagery-based indicators
   const mgrid = makeMetricGrid(state.aoi.polygon);                        // 30 m UTM grid for product rasters
   const datasets = DATASETS.filter(d => phen.includes(d.phenomenon));
@@ -577,6 +614,10 @@ async function analyze() {
   state.activeEvent = (results.events.find(e => e.firstAffected) || {}).id || null;
 
   const states = phen.map(pid => `${PHENOMENA[pid].short}: ${STATE_TEXT[phenomenonState(pid)]}`);
+  const anyChange = phen.some(pid => phenomenonState(pid) === 'change');
+  const anyError = phen.some(pid => /error/.test(phenomenonState(pid)));
+  if (!state.dates.length) kidStatus(anyError ? '⚠️ We couldn’t get the satellite pictures. Try again later.' : '☁️ No clear pictures for this place and time. Try other dates!', 'warn');
+  else kidStatus(anyChange ? '🎉 Done! Something changed – see what we found.' : '✅ Done! See what we found.', 'ok');
   if (!state.dates.length) {
     setStatus(`No usable NASA observations.\n${states.join('\n')}\nSee Data sources for each dataset's diagnostics.`, true);
     renderSources(); renderFindings(); buildTimeline();
@@ -1192,7 +1233,10 @@ function selectDate(idx) {
   const chip = $('#phase-chip');
   chip.hidden = !ph;
   if (ph) {
-    chip.textContent = ph === 'uncertain' ? `${ev.title}: uncertain at this date` : `${ph[0].toUpperCase() + ph.slice(1)} ${ev.title.toLowerCase()}`;
+    const k = PHENOMENA[ev.phenomenon].kid;
+    chip.textContent = state.simple
+      ? { before: `${k.emoji} Before`, during: `${k.emoji} During`, after: `${k.emoji} After`, uncertain: `${k.emoji} Can’t tell on this day` }[ph]
+      : ph === 'uncertain' ? `${ev.title}: uncertain at this date` : `${ph[0].toUpperCase() + ph.slice(1)} ${ev.title.toLowerCase()}`;
     chip.title = ph === 'uncertain' ? 'This date lies in a window between observations, or after the last observation of an event whose end was not observed.' : '';
     chip.className = `phase-chip ph-${ph}`;
   }
@@ -1209,7 +1253,7 @@ function drawTimelineSvg() {
   const svg = $('#tl-svg');
   const res = state.results;
   if (!res) { svg.innerHTML = ''; return; }
-  const rows = [...res.byId.values()];
+  const rows = state.simple ? [] : [...res.byId.values()];   // simple mode: event track only
   const evs = res.events || [];
   const box = svg.parentElement;
   const left = (box.clientWidth || 600) < 480 ? 112 : 150, right = 12, top = 22;
@@ -1246,7 +1290,7 @@ function drawTimelineSvg() {
     d.setUTCMonth(d.getUTCMonth() + stepMonths);
   }
   s += eventTrackSvg(evs, { x, left, right, top, W, evRowH, C, t0, t1 });
-  if (evs.length) {
+  if (evs.length && rows.length) {
     s += `<line x1="0" x2="${W}" y1="${dsTop - 9}" y2="${dsTop - 9}" stroke="${C.line}"/>` +
          `<text x="6" y="${dsTop + 2}" font-size="9" font-weight="600" letter-spacing=".08em" fill="${C.text}">SATELLITE OBSERVATIONS</text>`;
   }
@@ -1302,7 +1346,8 @@ function drawTimelineSvg() {
     const xx = x(state.dates[state.dateIdx]);
     s += `<line x1="${xx}" x2="${xx}" y1="${top - 6}" y2="${H - 10}" stroke="${C.accent}" stroke-width="2"/>`;
   }
-  s += `<text x="6" y="${H - 3}" font-size="9" fill="${C.text}">Event track: solid = observed · hatched = date uncertainty window · ▲ peak · ┊ reported date  |  ticks = NASA acquisitions · ● analysed · ■ water baseline · ◌ low coverage · × no image</text>`;
+  if (state.simple) s += `<text x="6" y="${H - 3}" font-size="10" fill="${C.text}">Coloured bars show when things happened · ▲ biggest moment · click a bar to jump there</text>`;
+  else s += `<text x="6" y="${H - 3}" font-size="9" fill="${C.text}">Event track: solid = observed · hatched = date uncertainty window · ▲ peak · ┊ reported date  |  ticks = NASA acquisitions · ● analysed · ■ water baseline · ◌ low coverage · × no image</text>`;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   svg.innerHTML = s;
   svg.querySelectorAll('[data-ev]').forEach(g => {
@@ -1335,9 +1380,10 @@ function eventTrackSvg(evs, g) {
     const col = ev.phenomenon === 'water' ? PHENOMENA.water.water.new : PHENOMENA[ev.phenomenon].ramp[2];
     const active = ev.id === state.activeEvent;
     const statusTxt = { detected: '', ongoing: ' · ongoing', insufficient: ' · uncertain', none: ' · none', 'no-data': ' · no data' }[ev.status];
-    s += `<text x="6" y="${cy + 4}" font-size="11" fill="${C.ink}" ${active ? 'font-weight="600"' : ''}>${esc(ev.title)}<tspan fill="${C.text}" font-size="10">${statusTxt}</tspan></text>`;
+    const evLabel = state.simple ? `${PHENOMENA[ev.phenomenon].kid.emoji} ${PHENOMENA[ev.phenomenon].kid.name}` : ev.title;
+    s += `<text x="6" y="${cy + 4}" font-size="11" fill="${C.ink}" ${active ? 'font-weight="600"' : ''}>${esc(evLabel)}<tspan fill="${C.text}" font-size="10">${state.simple ? '' : statusTxt}</tspan></text>`;
     if (ev.status === 'none' || ev.status === 'no-data') {
-      s += `<text x="${left + 4}" y="${cy + 4}" font-size="10" fill="${C.text}">${ev.status === 'none' ? 'Not detected in any valid observation' : 'No usable observations'}</text>`;
+      s += `<text x="${left + 4}" y="${cy + 4}" font-size="10" fill="${C.text}">${state.simple ? (ev.status === 'none' ? 'Nothing found 👍' : 'No pictures') : ev.status === 'none' ? 'Not detected in any valid observation' : 'No usable observations'}</text>`;
       return;
     }
     const label = ev.status === 'insufficient'
@@ -1605,6 +1651,16 @@ document.querySelectorAll('.seg button[data-view]').forEach(b => b.addEventListe
 function renderLegend() {
   const el = $('#legend');
   const phen = state.results ? state.results.phen : selectedPhenomena();
+  if (state.simple) {
+    const items = [];
+    if (phen.includes('vegetation')) items.push([PHENOMENA.vegetation.ramp[3], '🌳 Damaged plants']);
+    if (phen.includes('water')) items.push([PHENOMENA.water.water.new, '🌊 New flood water'], [PHENOMENA.water.water.normal, '💧 Normal rivers & lakes']);
+    if (phen.includes('fire')) items.push([PHENOMENA.fire.ramp[2], '🔥 Fire']);
+    if (phen.includes('algae')) items.push([PHENOMENA.algae.ramp[2], '🦠 Algae']);
+    items.push(['#ff7a00', '📍 Your place']);
+    setLegend(el, `${state.outdated ? '<div class="lg-note lg-warn">Out of date – press the button again.</div>' : ''}<div class="lg-kid">${items.map(([c, t]) => `<span><i class="sw" style="background:${c}"></i>${t}</span>`).join('')}</div>`);
+    return;
+  }
   if (state.view === 'original') {
     setLegend(el, state.results
       ? `<h4>NASA original colours</h4><div class="lg-note">NASA's own visualisation (for viewing only) of the datasets ticked in Data sources. Switch to <b>Analysed</b> for results computed from the product data.</div>`
@@ -1658,6 +1714,73 @@ const CONF_CLASS = { High: 'c-high', Medium: 'c-med', Low: 'c-low', 'Insufficien
 
 const STATE_CLASS = { change: 'v-new', 'no-change': 'v-none', insufficient: 'v-na', 'data-error': 'v-err', 'processing-error': 'v-err', outdated: 'v-na' };
 const stateChip = pid => { const st = phenomenonState(pid); return `<span class="verdict ${STATE_CLASS[st]}" title="Analysis state">${STATE_TEXT[st][0].toUpperCase() + STATE_TEXT[st].slice(1)}</span>`; };
+// ---- Simple ("kid") findings: one plain sentence per thing, no jargon, no tables
+const FIELD_KM2 = 0.00714;                      // one football pitch (105 m × 68 m)
+const KID_SAY = {
+  change: { water: 'New flood water found!', vegetation: 'Some trees or plants were damaged.', fire: 'Fire spotted from space!', algae: 'Green algae spotted in the water.' },
+  'no-change': { water: 'No new flooding. 👍', vegetation: 'Plants look fine here. 👍', fire: 'No fires spotted. 👍', algae: 'The water looks clear. 👍' },
+  insufficient: 'Not enough clear pictures to tell (clouds, or the satellite didn’t pass by).',
+  'data-error': 'We couldn’t get the satellite pictures right now.',
+  'processing-error': 'Something went wrong reading the pictures.',
+  outdated: 'You changed something – press “Look from space!” again.'
+};
+const KID_PILL = { change: 'Changed', 'no-change': 'All clear', insufficient: 'Can’t tell', 'data-error': 'No pictures', 'processing-error': 'Oops', outdated: 'Out of date' };
+function kidAmount(pid, date) {
+  if (pid === 'water') { const ws = summarizeWater(date); const h = ws.headline; return h && h.f.role === 'post' && h.r.baseline ? h.f.stats.newKm2 : 0; }
+  if (pid === 'vegetation') { const vs = summarizeVeg(date); return vs.headline ? vs.headline.f.stats.detectedKm2 : 0; }
+  const sum = summarize(pid, date); return sum ? sum.stats.affected : 0;
+}
+function fieldsText(km2) {
+  const n = km2 / FIELD_KM2;
+  if (n < 1) return 'smaller than one football field ⚽';
+  return `about ${Math.round(n).toLocaleString()} football field${Math.round(n) === 1 ? '' : 's'} ⚽`;
+}
+function kidFindings(date) {
+  const res = state.results;
+  const place = state.loadedExample ? state.loadedExample.kid.title : 'your spot';
+  const head = state.outdated
+    ? `<div class="kid-banner">🔄 ${KID_SAY.outdated}</div>`
+    : `<p class="kid-intro">Here’s what satellites saw at <b>${esc(place)}</b>${date ? ` on <b>${fmtDay(date)}</b>` : ''}.</p>`;
+  const cards = res.phen.map(pid => {
+    const p = PHENOMENA[pid], st = phenomenonState(pid);
+    let say = typeof KID_SAY[st] === 'string' ? KID_SAY[st] : KID_SAY[st][pid], more = '';
+    if (st === 'change' && date) {
+      const km = kidAmount(pid, date);
+      if (km > 0) {
+        const what = pid === 'water' ? 'of land is under water that was dry before' : pid === 'vegetation' ? 'of plants were damaged' : pid === 'fire' ? 'was burning' : 'of water has algae';
+        more = `About <b>${fmtKm(km)} km²</b> ${what} – ${fieldsText(km)}.`;
+      } else {
+        say = 'Nothing yet on this day.';
+        more = 'Move the timeline below to see when it changed. ⏳';
+      }
+    }
+    return `<article class="kid-card st-${st}" style="--k:${p.kid.color}">
+      <div class="kid-ico" aria-hidden="true">${p.kid.emoji}</div>
+      <div class="kid-body"><h3>${p.kid.name}<span class="kid-pill">${KID_PILL[st]}</span></h3>
+        <p class="kid-say">${say}</p>${more ? `<p class="kid-more">${more}</p>` : ''}</div>
+    </article>`;
+  }).join('');
+  return head + kidWhen(date) + cards + `<p class="kid-foot">Want all the science? Switch to <button type="button" class="btn-link" data-mode-go="detailed">🔬 Detailed</button>.</p>`;
+}
+function kidWhen(date) {
+  const ev = activeEvent();
+  if (!ev || !ev.firstAffected || state.outdated) return '';
+  const p = PHENOMENA[ev.phenomenon];
+  const start = ev.onset.earliest ? `between <b>${fmtDay(ev.onset.earliest)}</b> and <b>${fmtDay(ev.onset.latest)}</b>` : `on or before <b>${fmtDay(ev.onset.latest)}</b>`;
+  const end = ev.end ? `It was over by <b>${fmtDay(ev.end.latest)}</b>.` : 'It may still be going on.';
+  const t = phaseTargets(ev, state.dates), ph = phaseOf(ev, date);
+  const btn = (k, label) => `<button type="button" class="kid-phase ${ph === k ? 'on' : ''}" data-goto-ev="${ev.id}" data-phase="${k}" ${t[k] ? '' : 'disabled'}>${label}</button>`;
+  return `<section class="kid-when" style="--k:${p.kid.color}">
+    <h3>📅 When did it happen?</h3>
+    <p>${p.kid.emoji} It started ${start}. ${end}</p>
+    <div class="kid-phases">${btn('before', '⏪ Before')}${btn('during', `${p.kid.emoji} During`)}${btn('after', '✅ After')}</div>
+  </section>`;
+}
+function wireKid(el) {
+  el.querySelectorAll('[data-goto-ev]').forEach(b => b.addEventListener('click', () => selectEvent(b.dataset.gotoEv, b.dataset.phase)));
+  el.querySelectorAll('[data-mode-go]').forEach(b => b.addEventListener('click', () => setMode(b.dataset.modeGo)));
+}
+
 /** Card when a phenomenon has no usable observation: say WHY, never show 0 km². */
 function noDataCard(pid, extra = '') {
   const p = PHENOMENA[pid];
@@ -1671,6 +1794,7 @@ function noDataCard(pid, extra = '') {
 function renderFindings() {
   const el = $('#findings');
   if (!state.results) return;
+  if (state.simple) { el.innerHTML = kidFindings(state.dates[state.dateIdx]); wireKid(el); return; }
   const date = state.dates[state.dateIdx];
   const grid = state.results.mgrid;
   const banner = '<div class="outdated-banner" ' + (state.outdated ? '' : 'hidden') + '></div>';
@@ -2057,6 +2181,22 @@ $('#export-json').addEventListener('click', () => {
 });
 
 // ============================================================ start-up
+// ============================================================ simple / detailed mode
+function setMode(mode) {
+  state.simple = mode !== 'detailed';
+  document.body.classList.toggle('simple', state.simple);
+  document.querySelectorAll('.mode-toggle [data-mode]').forEach(b => {
+    const on = b.dataset.mode === (state.simple ? 'simple' : 'detailed');
+    b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on));
+  });
+  try { localStorage.setItem('esm-mode', state.simple ? 'simple' : 'detailed'); } catch { /* ignore */ }
+  if (state.simple) { showTab('findings'); state.view = 'classified'; }
+  renderLegend();
+  if (state.results) { renderFindings(); drawTimelineSvg(); renderMapLayers(); }
+  if (state.chart) state.chart.resize();
+}
+document.querySelectorAll('.mode-toggle [data-mode]').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+
 // ============================================================ guided tour
 const panelHas = sel => () => document.querySelector(sel);
 initTour([
@@ -2090,6 +2230,10 @@ $('#tour-btn').addEventListener('click', startTour);
 (function init() {
   initLayout(() => { if (state.chart) state.chart.resize(); });
   initTerms();
+  renderPlaces();
+  let mode = 'simple';
+  try { mode = localStorage.getItem('esm-mode') || 'simple'; } catch { /* ignore */ }
+  setMode(mode);
   const end = today();
   const start = new Date(Date.now() - 180 * 86400000).toISOString().slice(0, 10);
   $('#start').value = start;

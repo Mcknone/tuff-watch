@@ -130,16 +130,48 @@ R = {}
 errors = []
 with sync_playwright() as p:
     b = p.chromium.launch(**({'executable_path': os.environ['CHROME_PATH']} if os.environ.get('CHROME_PATH') else {}), args=['--no-sandbox'])
-    page = b.new_page(viewport={'width':1500,'height':950})
-    page.on('pageerror', lambda e: errors.append(str(e)))
-    page.on('console', lambda m: m.type == 'error' and errors.append(m.text))
-    page.route(re.compile(r'.*unpkg\.com/.*\.js$'), lambda r: r.fulfill(body=MAPLIBRE_STUB, content_type='application/javascript'))
-    page.route(re.compile(r'.*unpkg\.com/.*\.css$'), lambda r: r.fulfill(body='', content_type='text/css'))
-    page.route(re.compile(r'.*jsdelivr\.net/npm/geotiff.*'), lambda r: r.fulfill(body=GEOTIFF_JS, content_type='application/javascript'))
-    page.route(re.compile(r'.*jsdelivr\.net/npm/chart.*'), lambda r: r.fulfill(body=CHART_STUB, content_type='application/javascript'))
-    page.route(re.compile(r'.*fonts\.(googleapis|gstatic)\.com.*'), lambda r: r.fulfill(body='', content_type='text/css'))
-    page.route(re.compile(r'.*/api/.*'), api)
-    page.goto('http://127.0.0.1:8765/index.html')
+    def new_page(mode=None):
+        pg = b.new_context(viewport={'width':1500,'height':950}).new_page()
+        pg.on('pageerror', lambda e: errors.append(str(e)))
+        pg.on('console', lambda m: m.type == 'error' and errors.append(m.text))
+        pg.route(re.compile(r'.*unpkg\.com/.*\.js$'), lambda r: r.fulfill(body=MAPLIBRE_STUB, content_type='application/javascript'))
+        pg.route(re.compile(r'.*unpkg\.com/.*\.css$'), lambda r: r.fulfill(body='', content_type='text/css'))
+        pg.route(re.compile(r'.*jsdelivr\.net/npm/geotiff.*'), lambda r: r.fulfill(body=GEOTIFF_JS, content_type='application/javascript'))
+        pg.route(re.compile(r'.*jsdelivr\.net/npm/chart.*'), lambda r: r.fulfill(body=CHART_STUB, content_type='application/javascript'))
+        pg.route(re.compile(r'.*fonts\.(googleapis|gstatic)\.com.*'), lambda r: r.fulfill(body='', content_type='text/css'))
+        pg.route(re.compile(r'.*/api/.*'), api)
+        if mode: pg.add_init_script(f"if (!localStorage.getItem('esm-mode')) localStorage.setItem('esm-mode', '{mode}')")
+        pg.goto('http://127.0.0.1:8765/index.html')
+        return pg
+
+    # ---------------------------------------------------------------- S. simple mode (the default)
+    sp = new_page()
+    sp.wait_for_timeout(800)
+    R['s_default'] = sp.evaluate("document.body.classList.contains('simple')")
+    R['s_hidden'] = [sp.is_visible(sel) for sel in ['#coord-body', '#examples', '.tabs', '#export-csv', '#veg-loss', '#event-date', '#context', '#reset-layout']]
+    R['s_places'] = sp.locator('#place-grid .place').count()
+    sp.click('#place-grid .place[data-ex="0"]'); sp.wait_for_timeout(200)
+    R['s_place_on'] = sp.get_attribute('#place-grid .place[data-ex="0"]', 'aria-pressed')
+    sp.click('#analyze')
+    sp.wait_for_function("document.querySelector('#analyze').disabled === false && /Done|couldn|No clear/.test(document.querySelector('#status-simple').textContent)", timeout=90000)
+    sp.wait_for_timeout(300)
+    R['s_status'] = sp.inner_text('#status-simple')
+    R['s_findings'] = sp.inner_text('#findings')
+    R['s_chart'] = sp.is_visible('.chart-box')
+    R['s_tracks'] = sp.evaluate("[...document.querySelectorAll('#tl-svg text')].some(t => /SATELLITE OBSERVATIONS|DIST-ALERT/.test(t.textContent))")
+    R['s_legend'] = sp.inner_text('#legend')
+    sp.click('.kid-phase[data-phase=before]'); sp.wait_for_timeout(150)
+    R['s_before'] = sp.inner_text('#findings')
+    sp.click('#pick-spot'); sp.wait_for_timeout(100)
+    sp.dispatch_event('#map', 'pointerdown', {'button': 0, 'pointerId': 1, 'pointerType': 'touch', 'clientX': 600, 'clientY': 400, 'isPrimary': True})
+    sp.dispatch_event('#map', 'pointerup', {'button': 0, 'pointerId': 1, 'pointerType': 'touch', 'clientX': 600, 'clientY': 400, 'isPrimary': True})
+    sp.wait_for_timeout(150)
+    R['s_spot'] = (sp.locator('#coord-body tr').count(), sp.is_visible('#pick-bar'), sp.inner_text('#aoi-info'), sp.inner_text('#findings')[:200])
+    sp.click('.mode-toggle [data-mode=detailed]'); sp.wait_for_timeout(200)
+    R['s_to_detailed'] = (sp.is_visible('#coord-body'), sp.is_visible('.tabs'), sp.evaluate("localStorage.getItem('esm-mode')"))
+    sp.close()
+
+    page = new_page('detailed')
     page.wait_for_timeout(800)
 
     # ---------------------------------------------------------------- A. inputs
@@ -290,6 +322,7 @@ print('LAYERS', R['layers'], R['layers_orig'], R['layers_outdated'])
 print('TIMELINE', R['slider_max'], R['chart_x'], R['chart_pts'], R['first_date'], R['snap_date'], R['ev_ids'], R['ev_date'], R['ev_chip'], R['before_date'], R['during_date'], R['last_date'])
 print('POINTER', {k: R[k] for k in ['plain_click', 'middle', 'middle_latlon', 'expect_latlon', 'middle_drag', 'pick_click', 'pick_drag', 'dup', 'rapid', 'offglobe', 'multitouch', 'crosshair_add', 'undo', 'after_esc']})
 print('GEOMETRY', R['circle'], '|', R['rect'], '|', R['bowtie'], '|', R['triangle'])
+print('SIMPLE', {k: R[k] for k in R if k.startswith('s_')})
 print('ERRORS', errors)
 
 assert not [e for e in errors if 'Failed to load resource' not in e], errors
@@ -367,4 +400,16 @@ assert 'Insufficient data' in R['pal_veg'] and 'no acquisitions' in R['pal_veg']
 assert 'Containment' in R['fire_card'] and 'reported, not satellite-derived' in R['fire_card']
 assert R['pal_outdated']
 assert 'Containment' not in R['fire_card2'] and 'Reported' in R['fire_card2']
+# S. simple mode: the default; technical controls hidden; plain-language answers
+assert R['s_default'] and not any(R['s_hidden']), R['s_hidden']
+assert R['s_places'] == 4 and R['s_place_on'] == 'true'
+assert 'Done' in R['s_status']
+assert 'New flood water found!' in R['s_findings'] and 'football field' in R['s_findings'] and 'When did it happen?' in R['s_findings']
+assert 'Some trees or plants were damaged.' in R['s_findings']
+assert 'km²' in R['s_findings'] and 'VEG-ANOM' not in R['s_findings'] and 'Confidence' not in R['s_findings']
+assert not R['s_chart'] and not R['s_tracks']
+assert 'New flood water' in R['s_legend'] and 'Your place' in R['s_legend']
+assert 'Nothing yet on this day' in R['s_before'] or 'No new flooding' in R['s_before']
+assert R['s_spot'][0] == 1 and not R['s_spot'][1] and 'circle, 10 km radius' in R['s_spot'][2] and 'You changed something' in R['s_spot'][3]
+assert R['s_to_detailed'] == (True, True, 'detailed')
 print('E2E: all assertions passed')
