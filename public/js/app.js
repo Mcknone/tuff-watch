@@ -771,7 +771,7 @@ async function runImageryDataset(ds, results, n, imgLimit, tick) {
     const picked = sampleDates(dates, n);
 
     if (ds.method !== 'presence' && ds.method !== 'sar') {
-      const xml = await fetchColormapXml(ds.gibs).catch(() => null);
+      const xml = await fetchColormapXml(ds.colormap || ds.gibs).catch(() => null);
       r.colormap = parseColormap(xml);
     }
     if (ds.method === 'rain') {
