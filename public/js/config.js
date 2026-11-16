@@ -129,6 +129,7 @@ export const DATASETS = [
     agency: 'NASA JPL OPERA · UMD GLAD · LP DAAC',
     resolution: '30 m',
     gibs: 'OPERA_L3_DIST-ALERT-HLS_Color_Index',          // visualisation only
+    colormap: 'OPERA_Vegetation_Disturbance_Status',          // NASA names colour maps differently from layers (see GIBS GetCapabilities)
     cmr: 'OPERA_L3_DIST-ALERT-HLS_V1',
     dates: 'granules',
     method: 'dist',
@@ -194,6 +195,7 @@ export const DATASETS = [
     agency: 'NASA JPL OPERA · PO.DAAC',
     resolution: '30 m',
     gibs: 'OPERA_L3_Dynamic_Surface_Water_Extent-Sentinel-1',
+    colormap: 'OPERA_Dynamic_Surface_Water_Extent_S1',          // NASA names colour maps differently from layers (see GIBS GetCapabilities)
     cmr: 'OPERA_L3_DSWX-S1_V1',
     dates: 'granules',
     method: 'water',
@@ -211,6 +213,7 @@ export const DATASETS = [
     agency: 'NASA JPL OPERA · USGS · PO.DAAC',
     resolution: '30 m',
     gibs: 'OPERA_L3_Dynamic_Surface_Water_Extent-HLS',
+    colormap: 'OPERA_Dynamic_Surface_Water_Extent',          // NASA names colour maps differently from layers (see GIBS GetCapabilities)
     cmr: 'OPERA_L3_DSWX-HLS_V1',
     dates: 'granules',
     method: 'water',
@@ -228,6 +231,7 @@ export const DATASETS = [
     agency: 'NASA LANCE · GSFC',
     resolution: '250 m',
     gibs: 'MODIS_Combined_Flood_2-Day',
+    colormap: 'MODIS_Flood',          // NASA names colour maps differently from layers (see GIBS GetCapabilities)
     cmr: 'MCDWD_L3_F2_NRT',
     dates: 'daily',
     method: 'water',
@@ -247,6 +251,7 @@ export const DATASETS = [
     agency: 'NASA GSFC · GES DISC',
     resolution: '~10 km',
     gibs: 'IMERG_Precipitation_Rate',
+    colormap: 'GPM_Precipitation_Rate',          // NASA names colour maps differently from layers (see GIBS GetCapabilities)
     cmr: 'GPM_3IMERGHHL',
     dates: 'daily',
     method: 'rain',
@@ -278,6 +283,7 @@ export const DATASETS = [
     agency: 'NASA GSFC · OB.DAAC',
     resolution: '1 km',
     gibs: 'OCI_PACE_Chlorophyll_a',
+    colormap: 'MODIS_Chlorophyll',          // NASA names colour maps differently from layers (see GIBS GetCapabilities)
     cmr: 'PACE_OCI_L2_BGC*',
     dates: 'daily',
     method: 'continuous',
@@ -293,6 +299,7 @@ export const DATASETS = [
     agency: 'NASA GSFC · OB.DAAC',
     resolution: '1 km',
     gibs: 'MODIS_Aqua_L2_Chlorophyll_A',
+    colormap: 'MODIS_Chlorophyll',          // NASA names colour maps differently from layers (see GIBS GetCapabilities)
     cmr: 'MODISA_L2_OC',
     dates: 'daily',
     method: 'continuous',
